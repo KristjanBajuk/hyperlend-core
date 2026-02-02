@@ -11,6 +11,7 @@ out/
 reports/
 diffs/
 downloads/
+liquidswap-adapters/artifacts/
 
 # editors
 .idea
