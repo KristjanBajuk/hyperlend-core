@@ -10,7 +10,9 @@ bytecode_hash = 'none'
 ignored_warnings_from = ["src/periphery/contracts/treasury/RevenueSplitter.sol"]
 out = 'out'
 libs = ['lib']
-remappings = []
+remappings = [
+    "@hyper-evm-lib-test/=lib/hyper-evm-lib/test/"
+]
 fs_permissions = [
     { access = "write", path = "./reports" },
     { access = "read", path = "./out" },

@@ -7,26 +7,7 @@ pragma solidity ^0.8.10;
  * @notice Interface for the HyperLend Limit Order Manager
  * @dev Manages limit orders that integrate HyperLend deposits with Hyperliquid's HyperCore spot trading.
  *
- * Use Case: Users can create limit orders to sell their yield-bearing aTokens at a target price.
- * For example: User deposits aWHYPE, sets trigger price at $20. When HYPE reaches $20, the keeper:
- * 1. Withdraws WHYPE from HyperLend
- * 2. Bridges WHYPE to HyperCore spot balance
- * 3. Places a spot limit order to sell HYPE for USDC
- * 4. When filled, settles USDC back to the user
- *
- * Order Lifecycle:
- * 1. PENDING - Order created, waiting for trigger price to be reached
- * 2. TRIGGERED - Keeper detected trigger price, withdrew funds from HyperLend
- * 3. ON_HYPERCORE - Order bridged to HyperCore and placed on spot order book
- * 4. FILLED - Order filled on HyperCore (can be partial)
- * 5. SETTLED - Funds transferred to user (on EVM or HyperCore)
- *
- * Users can cancel PENDING orders or request refunds for TRIGGERED/ON_HYPERCORE orders.
- *
- * Spot Pair ID Format:
- * - hyperCoreSpotPairId = 10000 + spot_pair_index (e.g., 10107 for HYPE/USDC)
- * - The spot_pair_index can be found in HyperCore's spotMeta.universe
- */
+ **/
 interface ILimitOrderManager {
     // ============ Custom Errors ============
 
@@ -66,23 +47,56 @@ interface ILimitOrderManager {
     /// @notice Thrown when order is not in FILLED status
     error OrderNotFilled();
 
-    /// @notice Thrown when order cannot be refunded in current status
-    error CannotRefundInCurrentStatus();
-
     /// @notice Thrown when withdrawal amount doesn't match expected amount
     error WithdrawalAmountMismatch();
 
     /// @notice Thrown when HyperCore token is not configured for the asset ID
     error TokenNotConfigured();
 
-    /// @notice Thrown when order is not in ON_HYPERCORE status (for cancellation request)
+    /// @notice Thrown when the contract doesn't have enough balance on HyperCore to settle
+    error InsufficientHyperCoreBalance();
+
+    /// @notice Thrown when order is already finalized (SETTLED or CANCELLED)
+    error OrderAlreadyFinalized();
+
+    /// @notice Thrown when refund is not allowed in the current order status
+    error CannotRefundInCurrentStatus();
+
+    /// @notice Thrown when order is not on HyperCore for cancellation
     error OrderNotOnHyperCoreForCancellation();
 
     /// @notice Thrown when order is not in CANCEL_REQUESTED status
     error OrderNotCancelRequested();
 
-    /// @notice Thrown when the contract doesn't have enough balance on HyperCore to settle
-    error InsufficientHyperCoreBalance();
+    /// @notice Thrown when order is not in FAILED_ON_HYPERCORE status
+    error OrderNotFailedOnHyperCore();
+
+    /// @notice Thrown when order is not in FAILED_ON_EVM status
+    error OrderNotFailedOnEvm();
+
+    /// @notice Thrown when spot pair ID is invalid (must be >= 10000)
+    error InvalidSpotPairId();
+
+    /// @notice Thrown when limit price is zero
+    error InvalidLimitPrice();
+
+    /// @notice Thrown when order has expired
+    error OrderExpired();
+
+    /// @notice Thrown when keeper address is zero
+    error ZeroKeeperAddress();
+
+    /// @notice Thrown when order does not exist
+    error OrderDoesNotExist();
+
+    /// @notice Thrown when contract has insufficient WHYPE balance for unwrap
+    error InsufficientWHYPEBalance();
+
+    /// @notice Thrown when native HYPE transfer fails
+    error NativeHypeTransferFailed();
+
+    /// @notice Thrown when address is zero
+    error ZeroAddress();
 
     // ============ Enums ============
 
@@ -93,12 +107,18 @@ interface ILimitOrderManager {
      *      - PENDING -> CANCELLED (user cancel)
      *      - TRIGGERED -> CANCELLED (user refund, tokens on EVM)
      *      - ON_HYPERCORE -> CANCEL_REQUESTED -> CANCELLED (two-step cancellation for HyperCore orders)
+     *      - Any status -> FAILED_ON_EVM or FAILED_ON_HYPERCORE (keeper sets error status when something fails)
      *
      *      Note: BRIDGING status is needed because HyperEVM to HyperCore transfers are not immediate.
      *      Transfers finalize by the next Core block, so bridgeToHyperCore and placeOrderOnHyperCore
      *      must be called in separate transactions.
+     *
+     *      Error Statuses:
+     *      - FAILED_ON_EVM: Order failed and funds are still on EVM (use recoverFromFailedOnEvm)
+     *      - FAILED_ON_HYPERCORE: Order failed and funds are on HyperCore (use recoverFromFailedOnHyperCore)
      */
     enum OrderStatus {
+        // ============ Normal Lifecycle Statuses ============
         NONE,              // Order doesn't exist (default value)
         PENDING,           // Order created, waiting for trigger price
         TRIGGERED,         // Trigger price hit, keeper executing withdrawal from HyperLend
@@ -107,7 +127,13 @@ interface ILimitOrderManager {
         CANCEL_REQUESTED,  // User requested cancellation, waiting for keeper to cancel on HyperCore
         FILLED,            // Order fully filled on HyperCore
         SETTLED,           // Funds returned to user
-        CANCELLED          // Order cancelled by user
+        CANCELLED,         // Order cancelled by user
+
+        // ============ Error Statuses ============
+        /// @dev Order failed and funds are still on EVM - use recoverFromFailedOnEvm()
+        FAILED_ON_EVM,
+        /// @dev Order failed and funds are on HyperCore - use recoverFromFailedOnHyperCore()
+        FAILED_ON_HYPERCORE
     }
 
     /**
@@ -146,31 +172,33 @@ interface ILimitOrderManager {
 
     /**
      * @notice Order data containing user-defined parameters
-     * @dev These values are set at order creation and remain immutable
+     * @dev These values are set at order creation and remain immutable.
      * @param user The address that created the order (order owner)
+     * @param triggerPrice The price at which keepers should trigger the order (10^8 precision)
+     * @param hyperCoreSpotPairId The spot pair ID on HyperCore (10000 + spot_pair_index)
      * @param aToken The HyperLend aToken to withdraw from
+     * @param limitPrice The limit price for the HyperCore order (10^8 precision)
+     * @param isBuy True for buy orders, false for sell orders
+     * @param tif Time-in-force option for the HyperCore order
+     * @param reduceOnly If true, order can only reduce an existing position
      * @param underlyingToken The underlying token of the aToken (e.g., WHYPE for aWHYPE, USDC for aUSDC).
      *                        For sell orders: this is the spot pair's base token being sold.
      *                        For buy orders: this is the spot pair's quote token being spent.
      * @param amount The amount of aTokens to use for the order
-     * @param triggerPrice The price at which keepers should trigger the order (10^8 precision)
-     * @param limitPrice The limit price for the HyperCore order (10^8 precision)
-     * @param hyperCoreSpotPairId The spot pair ID on HyperCore (10000 + spot_pair_index)
-     * @param isBuy True for buy orders, false for sell orders
-     * @param tif Time-in-force option for the HyperCore order
-     * @param reduceOnly If true, order can only reduce an existing position
+     * @param expiresAt Unix timestamp when the order expires (0 for no expiration)
      */
     struct OrderData {
         address user;
-        address aToken;
-        address underlyingToken;
-        uint256 amount;
         uint64 triggerPrice;
-        uint64 limitPrice;
         uint32 hyperCoreSpotPairId;
+        address aToken;
+        uint64 limitPrice;
         bool isBuy;
         TimeInForce tif;
         bool reduceOnly;
+        address underlyingToken;
+        uint256 amount;
+        uint256 expiresAt;
     }
 
     /**
@@ -218,6 +246,7 @@ interface ILimitOrderManager {
      * @param isBuy True for buy order, false for sell order
      * @param tif Time-in-force option (ALO, GTC, or IOC)
      * @param reduceOnly If true, order can only reduce existing position
+     * @param expiresAt Unix timestamp when the order expires (0 for no expiration)
      */
     struct CreateOrderParams {
         address aToken;
@@ -228,22 +257,29 @@ interface ILimitOrderManager {
         bool isBuy;
         TimeInForce tif;
         bool reduceOnly;
+        uint256 expiresAt;
     }
 
     /**
-     * @notice EIP-2612 permit signature data for gasless approvals
-     * @param amount The amount to approve
-     * @param deadline The deadline timestamp for the permit
-     * @param v The recovery byte of the signature
-     * @param r The first 32 bytes of the signature
-     * @param s The second 32 bytes of the signature
+     * @notice Parameters for placing an order on HyperCore in batch operations
+     * @param orderId The order ID to place on HyperCore
+     * @param cloid Client order ID for tracking the order on HyperCore
      */
-    struct PermitSignature {
-        uint256 amount;
-        uint256 deadline;
-        uint8 v;
-        bytes32 r;
-        bytes32 s;
+    struct PlaceOrderOnHyperCoreParams {
+        uint256 orderId;
+        uint128 cloid;
+    }
+
+    /**
+     * @notice Parameters for reporting a fill in batch operations
+     * @param orderId The order ID that was filled
+     * @param baseAmountFilled The base token amount filled in this event
+     * @param quoteAmountReceived The quote token amount received in this event
+     */
+    struct ReportFillParams {
+        uint256 orderId;
+        uint256 baseAmountFilled;
+        uint256 quoteAmountReceived;
     }
 
     // ============ Events ============
@@ -265,6 +301,9 @@ interface ILimitOrderManager {
      * @param limitPrice The limit price for HyperCore
      * @param hyperCoreSpotPairId The HyperCore spot pair ID
      * @param isBuy True for buy, false for sell
+     * @param tif Time in force for the order
+     * @param reduceOnly Whether the order is reduce-only
+     * @param expiresAt Unix timestamp when the order expires (0 for no expiration)
      */
     event OrderCreated(
         uint256 indexed orderId,
@@ -274,7 +313,10 @@ interface ILimitOrderManager {
         uint64 triggerPrice,
         uint64 limitPrice,
         uint32 hyperCoreSpotPairId,
-        bool isBuy
+        bool isBuy,
+        TimeInForce tif,
+        bool reduceOnly,
+        uint256 expiresAt
     );
 
     /**
@@ -360,26 +402,52 @@ interface ILimitOrderManager {
     );
 
     /**
-     * @notice Emitted when a user requests cancellation of an ON_HYPERCORE order
+     * @notice Emitted when user cancels an order on HyperCore (first step of two-step refund)
      * @param orderId The order ID
-     * @param user The user who requested cancellation
-     */
-    event CancellationRequested(
-        uint256 indexed orderId,
-        address indexed user
-    );
-
-    /**
-     * @notice Emitted when keeper cancels an order on HyperCore
-     * @param orderId The order ID
-     * @param keeper The keeper who cancelled on HyperCore
+     * @param user The user who cancelled on HyperCore
      * @param cloid The client order ID that was cancelled
      */
     event OrderCancelledOnHyperCore(
         uint256 indexed orderId,
-        address indexed keeper,
+        address indexed user,
         uint128 cloid
     );
+
+    /**
+     * @notice Emitted when a keeper changes an order's status
+     * @param orderId The order ID
+     * @param keeper The keeper who changed the status
+     * @param oldStatus The previous status
+     * @param newStatus The new status
+     */
+    event OrderStatusChanged(
+        uint256 indexed orderId,
+        address indexed keeper,
+        OrderStatus oldStatus,
+        OrderStatus newStatus
+    );
+
+    /**
+     * @notice Emitted when native HYPE is received (from WHYPE unwrap)
+     * @param sender The address that sent the native HYPE
+     * @param amount The amount of native HYPE received
+     */
+    event NativeHypeReceived(address indexed sender, uint256 amount);
+
+    /**
+     * @notice Emitted when ERC20 tokens are recovered from the contract
+     * @param token The token address that was recovered
+     * @param to The address that received the tokens
+     * @param amount The amount of tokens recovered
+     */
+    event TokensRecovered(address indexed token, address indexed to, uint256 amount);
+
+    /**
+     * @notice Emitted when native HYPE is recovered from the contract
+     * @param to The address that received the native HYPE
+     * @param amount The amount of native HYPE recovered
+     */
+    event NativeHypeRecovered(address indexed to, uint256 amount);
 
     // ============ User Functions ============
 
@@ -393,32 +461,62 @@ interface ILimitOrderManager {
     function createOrder(CreateOrderParams calldata params) external returns (uint256 orderId);
 
     /**
-     * @notice Create a new limit order using EIP-2612 permit for gasless approval
-     * @dev Combines approval and order creation in a single transaction
-     * @param params The order creation parameters
-     * @param permit The permit signature data for aToken approval
-     * @return orderId The unique identifier for the created order
-     */
-    function createOrderWithPermit(
-        CreateOrderParams calldata params,
-        PermitSignature calldata permit
-    ) external returns (uint256 orderId);
-
-    /**
-     * @notice Cancel a pending order
-     * @dev Only callable by the order owner. Only PENDING orders can be cancelled.
-     * No token transfer occurs since aTokens haven't been moved yet.
+     * @notice Cancel a PENDING order
+     * @dev Only callable by the order owner. Since aTokens are only transferred when the order
+     * is triggered, no token transfer is needed for cancellation of pending orders.
      * @param orderId The order ID to cancel
      */
-    function cancelOrder(uint256 orderId) external;
+    function cancelPendingOrder(uint256 orderId) external;
 
     /**
-     * @notice Request a refund for a triggered but unfilled order
-     * @dev Only callable by the order owner. Only TRIGGERED, BRIDGING, or ON_HYPERCORE orders can be refunded.
-     * Returns the underlying tokens (already withdrawn from HyperLend) to the user.
-     * @param orderId The order ID to refund
+     * @notice Cancel a TRIGGERED order and return tokens on EVM
+     * @dev Only callable by the order owner. Returns underlying tokens that were withdrawn
+     * from HyperLend but not yet bridged to HyperCore.
+     * @param orderId The order ID to cancel
      */
-    function userRefund(uint256 orderId) external;
+    function cancelTriggeredOrder(uint256 orderId) external;
+
+    /**
+     * @notice Cancel a BRIDGING order and return tokens on HyperCore
+     * @dev Only callable by the order owner. Tokens have been bridged to HyperCore but
+     * the order hasn't been placed yet. Sends tokens back to user on HyperCore.
+     * Must wait for the next Core block after bridgeToHyperCore before calling.
+     * @param orderId The order ID to cancel
+     */
+    function cancelBridgedOrder(uint256 orderId) external;
+
+    /**
+     * @notice Request cancellation of an ON_HYPERCORE order (first step of two-step cancellation)
+     * @dev Only callable by the order owner. Cancels the order on HyperCore and sets
+     * status to CANCEL_REQUESTED. Must call finalizeCancellation() after next Core block.
+     * @param orderId The order ID to cancel
+     */
+    function requestCancellation(uint256 orderId) external;
+
+    /**
+     * @notice Finalize cancellation and return tokens on HyperCore (second step)
+     * @dev Callable by the order owner or authorized keepers. Sends filled tokens and
+     * unfilled tokens back to user on HyperCore.
+     * Must be called after requestCancellation and waiting for the next Core block.
+     * @param orderId The order ID to finalize cancellation for
+     */
+    function finalizeCancellation(uint256 orderId) external;
+
+    /**
+     * @notice Recover funds from an order in FAILED_ON_HYPERCORE status
+     * @dev Only callable by the order owner. Sends tokens back to user on HyperCore.
+     * Use this when order failed and funds are on HyperCore.
+     * @param orderId The order ID to recover funds from
+     */
+    function recoverFromFailedOnHyperCore(uint256 orderId) external;
+
+    /**
+     * @notice Recover funds from FAILED_ON_EVM status when tokens are still on EVM
+     * @dev Only callable by the order owner. Returns underlying tokens on EVM.
+     * Use this when order failed and tokens never reached HyperCore.
+     * @param orderId The order ID to recover funds from
+     */
+    function recoverFromFailedOnEvm(uint256 orderId) external;
 
     // ============ Keeper Functions ============
 
@@ -469,81 +567,27 @@ interface ILimitOrderManager {
     function settleOrder(uint256 orderId) external;
 
     /**
-     * @notice Cancel an order in BRIDGING status
-     * @dev Only callable by the order owner. Tokens have been bridged to HyperCore but order
-     *      hasn't been placed yet. Sends base tokens back to user on HyperCore.
-     *      Must wait for next Core block after bridgeToHyperCore before calling.
-     * @param orderId The order ID to cancel
+     * @notice Change the status of an order
+     * @dev Only callable by authorized keepers. Use with caution - this bypasses normal state transitions.
+     *      Intended for emergency recovery or correcting order states that got stuck.
+     * @param orderId The order ID to update
+     * @param newStatus The new status to set
      */
-    function cancelBridging(uint256 orderId) external;
+    function setOrderStatus(uint256 orderId, OrderStatus newStatus) external;
+
+    // ============ Admin Functions ============
 
     /**
-     * @notice Cancel an order on HyperCore (step 1 of 2)
-     * @dev Only callable by the order owner. Cancels the order on HyperCore using the cloid.
-     *      Sets status to CANCEL_REQUESTED. After calling this, wait for the next Core block,
-     *      then call completeCancellation to receive tokens.
-     * @param orderId The order ID to cancel on HyperCore
+     * @notice Pause the contract
+     * @dev Only callable by the contract owner. When paused, order creation and execution are disabled.
+     *      Cancellation functions remain available so users can recover their funds.
      */
-    function cancelOrderOnHyperCore(uint256 orderId) external;
+    function pause() external;
 
     /**
-     * @notice Complete cancellation and receive tokens (step 2 of 2)
-     * @dev Only callable by the order owner or keeper. Sends tokens back to user on HyperCore:
-     *      - For sell orders: filled quote tokens + unfilled base tokens
-     *      - For buy orders: filled base tokens + unfilled quote tokens
-     *      Must be called after cancelOrderOnHyperCore and waiting for next Core block.
-     * @param orderId The order ID to complete cancellation for
+     * @notice Unpause the contract
+     * @dev Only callable by the contract owner.
      */
-    function completeCancellation(uint256 orderId) external;
-
-    // ============ View Functions ============
-
-    /**
-     * @notice Get complete order information
-     * @param orderId The order ID to query
-     * @return The full LimitOrder struct containing data and state
-     */
-    function getOrder(uint256 orderId) external view returns (LimitOrder memory);
-
-    /**
-     * @notice Get only the order data (user-defined parameters)
-     * @dev More gas efficient than getOrder() when only data is needed
-     * @param orderId The order ID to query
-     * @return The OrderData struct
-     */
-    function getOrderData(uint256 orderId) external view returns (OrderData memory);
-
-    /**
-     * @notice Get only the order state (execution status and metadata)
-     * @dev More gas efficient than getOrder() when only state is needed
-     * @param orderId The order ID to query
-     * @return The OrderState struct
-     */
-    function getOrderState(uint256 orderId) external view returns (OrderState memory);
-
-    /**
-     * @notice Get all order IDs created by a user
-     * @param user The user address to query
-     * @return Array of order IDs belonging to the user
-     */
-    function getUserOrders(address user) external view returns (uint256[] memory);
-
-    /**
-     * @notice Get the total number of orders created
-     * @return The order counter (also the last order ID)
-     */
-    function getOrderCount() external view returns (uint256);
-
-    /**
-     * @notice Get the contract's HyperCore spot balance for a given token
-     * @dev Useful for keepers to verify the actual balance before calling reportFill.
-     *      The balance returned is in HyperCore wei (8 decimals).
-     *      For USDC: divide by 10^8 to get USDC amount
-     *      For HYPE: divide by 10^8 to get HYPE amount
-     * @param tokenIndex The HyperCore token index (0 for USDC, 150 for HYPE, etc.)
-     * @return total The total balance available
-     * @return hold The amount on hold (in open orders)
-     */
-    function getHyperCoreBalance(uint64 tokenIndex) external view returns (uint64 total, uint64 hold);
+    function unpause() external;
 }
 
