@@ -90,8 +90,6 @@ contract LimitOrderCancellationTest is Test {
             limitPrice: 21e8,
             hyperCoreSpotPairId: HYPE_USDC_SPOT_PAIR_ID,
             isBuy: true,
-            tif: ILimitOrderManager.TimeInForce.GTC,
-            reduceOnly: false,
             expiresAt: 0
         });
     }
@@ -458,8 +456,6 @@ contract LimitOrderCancellationTest is Test {
                 limitPrice: 24e8,
                 hyperCoreSpotPairId: HYPE_USDC_SPOT_PAIR_ID,
                 isBuy: false, // Sell order
-                tif: ILimitOrderManager.TimeInForce.GTC,
-                reduceOnly: false,
                 expiresAt: 0
             })
         );
@@ -535,8 +531,6 @@ contract LimitOrderCancellationTest is Test {
                 limitPrice: 24e8,
                 hyperCoreSpotPairId: HYPE_USDC_SPOT_PAIR_ID,
                 isBuy: false, // Sell order
-                tif: ILimitOrderManager.TimeInForce.GTC,
-                reduceOnly: false,
                 expiresAt: 0
             })
         );
@@ -591,7 +585,7 @@ contract LimitOrderCancellationTest is Test {
         uint256 orderId = limitOrderManager.createOrder(params);
 
         // Verify it's a buy order
-        (,,,,, bool isBuy,,,,,) = limitOrderManager.orderData(orderId);
+        (,,,,, bool isBuy,,,) = limitOrderManager.orderData(orderId);
         assertTrue(isBuy, "Should be a buy order");
 
         // Set order to CANCEL_REQUESTED status
@@ -615,7 +609,7 @@ contract LimitOrderCancellationTest is Test {
         uint256 orderId = limitOrderManager.createOrder(params);
 
         // Verify it's a sell order
-        (,,,,, bool isBuy,,,,,) = limitOrderManager.orderData(orderId);
+        (,,,,, bool isBuy,,,) = limitOrderManager.orderData(orderId);
         assertFalse(isBuy, "Should be a sell order");
 
         // Set order to CANCEL_REQUESTED status
@@ -639,7 +633,7 @@ contract LimitOrderCancellationTest is Test {
         uint256 orderId = limitOrderManager.createOrder(params);
 
         // Verify it's a buy order
-        (,,,,, bool isBuy,,,,,) = limitOrderManager.orderData(orderId);
+        (,,,,, bool isBuy,,,) = limitOrderManager.orderData(orderId);
         assertTrue(isBuy, "Should be a buy order");
 
         // Set order to CANCEL_REQUESTED status
@@ -663,7 +657,7 @@ contract LimitOrderCancellationTest is Test {
         uint256 orderId = limitOrderManager.createOrder(params);
 
         // Verify it's a sell order
-        (,,,,, bool isBuy,,,,,) = limitOrderManager.orderData(orderId);
+        (,,,,, bool isBuy,,,) = limitOrderManager.orderData(orderId);
         assertFalse(isBuy, "Should be a sell order");
 
         // Set order to CANCEL_REQUESTED status
@@ -748,7 +742,7 @@ contract LimitOrderCancellationTest is Test {
         uint256 orderId = limitOrderManager.createOrder(params);
 
         // Verify it's a buy order
-        (,,,,, bool isBuy,,,,,) = limitOrderManager.orderData(orderId);
+        (,,,,, bool isBuy,,,) = limitOrderManager.orderData(orderId);
         assertTrue(isBuy, "Should be a buy order");
 
         // Set order to BRIDGING status
@@ -771,16 +765,16 @@ contract LimitOrderCancellationTest is Test {
         uint256 orderId = limitOrderManager.createOrder(params);
 
         // Verify it's a sell order
-        (,,,,, bool isBuy,,,,,) = limitOrderManager.orderData(orderId);
-        assertFalse(isBuy, "Should be a sell order");
+        (,,,,, bool isBuy2,,,) = limitOrderManager.orderData(orderId);
+        assertFalse(isBuy2, "Should be a sell order");
 
         // Set order to BRIDGING status
         vm.prank(keeper);
         limitOrderManager.setOrderStatus(orderId, ILimitOrderManager.OrderStatus.BRIDGING);
 
         // Verify status changed
-        (ILimitOrderManager.OrderStatus status,,,,,,,) = limitOrderManager.orderStates(orderId);
-        assertEq(uint8(status), uint8(ILimitOrderManager.OrderStatus.BRIDGING));
+        (ILimitOrderManager.OrderStatus status2,,,,,,,) = limitOrderManager.orderStates(orderId);
+        assertEq(uint8(status2), uint8(ILimitOrderManager.OrderStatus.BRIDGING));
     }
 
     /// @notice Test recoverFromFailedOnHyperCore with buy order
@@ -794,7 +788,7 @@ contract LimitOrderCancellationTest is Test {
         uint256 orderId = limitOrderManager.createOrder(params);
 
         // Verify it's a buy order
-        (,,,,, bool isBuy,,,,,) = limitOrderManager.orderData(orderId);
+        (,,,,, bool isBuy,,,) = limitOrderManager.orderData(orderId);
         assertTrue(isBuy, "Should be a buy order");
 
         // Set order to FAILED_ON_HYPERCORE status
@@ -817,16 +811,16 @@ contract LimitOrderCancellationTest is Test {
         uint256 orderId = limitOrderManager.createOrder(params);
 
         // Verify it's a sell order
-        (,,,,, bool isBuy,,,,,) = limitOrderManager.orderData(orderId);
-        assertFalse(isBuy, "Should be a sell order");
+        (,,,,, bool isBuy2,,,) = limitOrderManager.orderData(orderId);
+        assertFalse(isBuy2, "Should be a sell order");
 
         // Set order to FAILED_ON_HYPERCORE status
         vm.prank(keeper);
         limitOrderManager.setOrderStatus(orderId, ILimitOrderManager.OrderStatus.FAILED_ON_HYPERCORE);
 
         // Verify status changed
-        (ILimitOrderManager.OrderStatus status,,,,,,,) = limitOrderManager.orderStates(orderId);
-        assertEq(uint8(status), uint8(ILimitOrderManager.OrderStatus.FAILED_ON_HYPERCORE));
+        (ILimitOrderManager.OrderStatus status2,,,,,,,) = limitOrderManager.orderStates(orderId);
+        assertEq(uint8(status2), uint8(ILimitOrderManager.OrderStatus.FAILED_ON_HYPERCORE));
     }
 }
 

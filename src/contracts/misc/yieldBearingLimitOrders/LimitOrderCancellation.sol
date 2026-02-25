@@ -6,6 +6,7 @@ import {SafeERC20} from '../../dependencies/openzeppelin/contracts/SafeERC20.sol
 import {ReentrancyGuard} from '../../dependencies/openzeppelin/ReentrancyGuard.sol';
 import {ILimitOrderManager} from './interfaces/ILimitOrderManager.sol';
 import {CoreWriterLib} from './libraries/CoreWriterLib.sol';
+import {PrecompileLib} from '@hyper-evm-lib/PrecompileLib.sol';
 
 /// @notice Interface for Wrapped HYPE (WHYPE) token
 interface IWHYPE {
@@ -81,6 +82,22 @@ abstract contract LimitOrderCancellation is ILimitOrderManager, ReentrancyGuard 
         CoreWriterLib.spotSend(recipient, tokenIndex, weiAmount);
     }
 
+    /**
+     * @dev Internal helper to send tokens on HyperCore with balance verification.
+     * Skips if amount is zero.
+     * @param recipient The address to send tokens to on HyperCore
+     * @param tokenIndex The HyperCore token index
+     * @param amount The amount to send in EVM wei units
+     */
+    function _sendTokensOnHyperCore(address recipient, uint64 tokenIndex, uint256 amount) internal {
+        if (amount == 0) return;
+
+        uint64 weiAmount = CoreWriterLib.evmToWei(tokenIndex, amount);
+        PrecompileLib.SpotBalance memory balance = PrecompileLib.spotBalance(address(this), tokenIndex);
+        if (balance.total < weiAmount) revert InsufficientHyperCoreBalance();
+        CoreWriterLib.spotSend(recipient, tokenIndex, weiAmount);
+    }
+
     // ============ Cancellation Functions ============
 
     /**
@@ -147,15 +164,18 @@ abstract contract LimitOrderCancellation is ILimitOrderManager, ReentrancyGuard 
 
     /**
      * @inheritdoc ILimitOrderManager
-     * @dev First step of two-step cancellation for ON_HYPERCORE orders.
+     * @dev First step of two-step cancellation for ON_HYPERCORE or PARTIALLY_FILLED orders.
      * Cancels the order on HyperCore and sets status to CANCEL_REQUESTED.
      * Must call finalizeCancellation() after next Core block.
+     *
+     * For PARTIALLY_FILLED orders, this cancels the remaining unfilled portion on HyperCore.
+     * The user will receive both filled tokens and unfilled refund in finalizeCancellation().
      */
     function requestCancellation(uint256 orderId) external override nonReentrant {
         OrderData storage data = _getOrderData(orderId);
         OrderState storage state = _getOrderState(orderId);
         if (data.user != msg.sender) revert NotOrderOwner();
-        if (state.status != OrderStatus.ON_HYPERCORE) {
+        if (state.status != OrderStatus.ON_HYPERCORE && state.status != OrderStatus.PARTIALLY_FILLED) {
             revert OrderNotOnHyperCoreForCancellation();
         }
 
@@ -192,37 +212,23 @@ abstract contract LimitOrderCancellation is ILimitOrderManager, ReentrancyGuard 
         if (data.isBuy) {
             // Buy order: user placed spot quote tokens to buy spot base tokens
             // Send filled spot base tokens to user (what they bought)
-            if (state.filledBaseAmount > 0) {
-                uint64 spotBaseWeiAmount = CoreWriterLib.evmToWei(spotBaseTokenIndex, state.filledBaseAmount);
-                CoreWriterLib.spotSend(data.user, spotBaseTokenIndex, spotBaseWeiAmount);
-            }
-
             // Send unfilled spot quote tokens back to user (what wasn't spent)
-            // Use safe subtraction to prevent underflow if filledQuoteAmount > data.amount
             uint256 unfilledQuoteAmount = state.filledQuoteAmount >= data.amount
                 ? 0
                 : data.amount - state.filledQuoteAmount;
-            if (unfilledQuoteAmount > 0) {
-                uint64 spotQuoteWeiAmount = CoreWriterLib.evmToWei(spotQuoteTokenIndex, unfilledQuoteAmount);
-                CoreWriterLib.spotSend(data.user, spotQuoteTokenIndex, spotQuoteWeiAmount);
-            }
+
+            _sendTokensOnHyperCore(data.user, spotBaseTokenIndex, state.filledBaseAmount);
+            _sendTokensOnHyperCore(data.user, spotQuoteTokenIndex, unfilledQuoteAmount);
         } else {
             // Sell order: user placed spot base tokens to sell for spot quote tokens
             // Send filled spot quote tokens to user (what they received)
-            if (state.filledQuoteAmount > 0) {
-                uint64 spotQuoteWeiAmount = CoreWriterLib.evmToWei(spotQuoteTokenIndex, state.filledQuoteAmount);
-                CoreWriterLib.spotSend(data.user, spotQuoteTokenIndex, spotQuoteWeiAmount);
-            }
-
             // Send unfilled spot base tokens back to user (what wasn't sold)
-            // Use safe subtraction to prevent underflow if filledBaseAmount > data.amount
             uint256 unfilledBaseAmount = state.filledBaseAmount >= data.amount
                 ? 0
                 : data.amount - state.filledBaseAmount;
-            if (unfilledBaseAmount > 0) {
-                uint64 spotBaseWeiAmount = CoreWriterLib.evmToWei(spotBaseTokenIndex, unfilledBaseAmount);
-                CoreWriterLib.spotSend(data.user, spotBaseTokenIndex, spotBaseWeiAmount);
-            }
+
+            _sendTokensOnHyperCore(data.user, spotQuoteTokenIndex, state.filledQuoteAmount);
+            _sendTokensOnHyperCore(data.user, spotBaseTokenIndex, unfilledBaseAmount);
         }
 
         emit OrderCancelled(orderId, data.user);

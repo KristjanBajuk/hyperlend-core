@@ -20,6 +20,9 @@ interface ILimitOrderManager {
     /// @notice Thrown when caller is not the order owner
     error NotOrderOwner();
 
+    /// @notice Thrown when caller is not the contract owner
+    error NotOwner();
+
     /// @notice Thrown when order amount is zero
     error ZeroAmount();
 
@@ -44,8 +47,8 @@ interface ILimitOrderManager {
     /// @notice Thrown when order is not on HyperCore (TRIGGERED or ON_HYPERCORE)
     error OrderNotOnHyperCore();
 
-    /// @notice Thrown when order is not in FILLED status
-    error OrderNotFilled();
+    /// @notice Thrown when order is not in FILLED status (use cancellation flow for PARTIALLY_FILLED)
+    error OrderNotSettleable();
 
     /// @notice Thrown when withdrawal amount doesn't match expected amount
     error WithdrawalAmountMismatch();
@@ -98,20 +101,30 @@ interface ILimitOrderManager {
     /// @notice Thrown when address is zero
     error ZeroAddress();
 
+    /// @notice Thrown when reported fill amount is less than previously recorded (invalid cumulative total)
+    error InvalidFillAmount();
+
     // ============ Enums ============
 
     /**
      * @notice Represents the current status of a limit order
-     * @dev Status transitions: NONE -> PENDING -> TRIGGERED -> BRIDGING -> ON_HYPERCORE -> FILLED -> SETTLED
+     * @dev Status transitions: NONE -> PENDING -> TRIGGERED -> BRIDGING -> ON_HYPERCORE -> [PARTIALLY_FILLED] -> FILLED -> SETTLED
      *      Alternative paths:
      *      - PENDING -> CANCELLED (user cancel)
      *      - TRIGGERED -> CANCELLED (user refund, tokens on EVM)
      *      - ON_HYPERCORE -> CANCEL_REQUESTED -> CANCELLED (two-step cancellation for HyperCore orders)
+     *      - ON_HYPERCORE -> PARTIALLY_FILLED -> FILLED (for GTC orders with partial fills)
      *      - Any status -> FAILED_ON_EVM or FAILED_ON_HYPERCORE (keeper sets error status when something fails)
      *
      *      Note: BRIDGING status is needed because HyperEVM to HyperCore transfers are not immediate.
      *      Transfers finalize by the next Core block, so bridgeToHyperCore and placeOrderOnHyperCore
      *      must be called in separate transactions.
+     *
+     *      Note: All orders use GTC (Good Till Cancel) time-in-force on HyperCore.
+     *
+     *      Partial Fill Handling:
+     *      - PARTIALLY_FILLED: Order has some fills but is not complete yet (waiting for more fills or cancellation)
+     *      - FILLED: Order is complete (fully filled, filledBaseAmount >= placedBaseAmount)
      *
      *      Error Statuses:
      *      - FAILED_ON_EVM: Order failed and funds are still on EVM (use recoverFromFailedOnEvm)
@@ -124,8 +137,9 @@ interface ILimitOrderManager {
         TRIGGERED,         // Trigger price hit, keeper executing withdrawal from HyperLend
         BRIDGING,          // Tokens bridged to HyperCore, waiting for next Core block to finalize
         ON_HYPERCORE,      // Order placed on HyperCore spot order book, waiting for fill
+        PARTIALLY_FILLED,  // Order has partial fills, waiting for more fills or completion
         CANCEL_REQUESTED,  // User requested cancellation, waiting for keeper to cancel on HyperCore
-        FILLED,            // Order fully filled on HyperCore
+        FILLED,            // Order complete (fully filled)
         SETTLED,           // Funds returned to user
         CANCELLED,         // Order cancelled by user
 
@@ -134,19 +148,6 @@ interface ILimitOrderManager {
         FAILED_ON_EVM,
         /// @dev Order failed and funds are on HyperCore - use recoverFromFailedOnHyperCore()
         FAILED_ON_HYPERCORE
-    }
-
-    /**
-     * @notice Time-in-force options for HyperCore orders
-     * @dev These correspond to HyperCore's TIF values:
-     *      ALO (1) - Add Liquidity Only: Order only executes as maker
-     *      GTC (2) - Good Till Cancel: Order remains until filled or cancelled
-     *      IOC (3) - Immediate Or Cancel: Fill immediately or cancel unfilled portion
-     */
-    enum TimeInForce {
-        ALO,    // Add Liquidity Only (1)
-        GTC,    // Good Till Cancel (2)
-        IOC     // Immediate Or Cancel (3)
     }
 
     // ============ Structs ============
@@ -173,14 +174,13 @@ interface ILimitOrderManager {
     /**
      * @notice Order data containing user-defined parameters
      * @dev These values are set at order creation and remain immutable.
+     *      All orders use GTC (Good Till Cancel) time-in-force on HyperCore.
      * @param user The address that created the order (order owner)
      * @param triggerPrice The price at which keepers should trigger the order (10^8 precision)
      * @param hyperCoreSpotPairId The spot pair ID on HyperCore (10000 + spot_pair_index)
      * @param aToken The HyperLend aToken to withdraw from
      * @param limitPrice The limit price for the HyperCore order (10^8 precision)
      * @param isBuy True for buy orders, false for sell orders
-     * @param tif Time-in-force option for the HyperCore order
-     * @param reduceOnly If true, order can only reduce an existing position
      * @param underlyingToken The underlying token of the aToken (e.g., WHYPE for aWHYPE, USDC for aUSDC).
      *                        For sell orders: this is the spot pair's base token being sold.
      *                        For buy orders: this is the spot pair's quote token being spent.
@@ -194,8 +194,6 @@ interface ILimitOrderManager {
         address aToken;
         uint64 limitPrice;
         bool isBuy;
-        TimeInForce tif;
-        bool reduceOnly;
         address underlyingToken;
         uint256 amount;
         uint256 expiresAt;
@@ -238,14 +236,13 @@ interface ILimitOrderManager {
 
     /**
      * @notice Parameters required to create a new limit order
+     * @dev All orders use GTC (Good Till Cancel) time-in-force on HyperCore.
      * @param aToken The HyperLend aToken address to use as collateral
      * @param amount The amount of aTokens to use
      * @param triggerPrice The price at which to trigger the order (10^8 precision)
      * @param limitPrice The limit price for the HyperCore order (10^8 precision)
      * @param hyperCoreSpotPairId The spot pair ID on HyperCore (10000 + spot_pair_index)
      * @param isBuy True for buy order, false for sell order
-     * @param tif Time-in-force option (ALO, GTC, or IOC)
-     * @param reduceOnly If true, order can only reduce existing position
      * @param expiresAt Unix timestamp when the order expires (0 for no expiration)
      */
     struct CreateOrderParams {
@@ -255,8 +252,6 @@ interface ILimitOrderManager {
         uint64 limitPrice;
         uint32 hyperCoreSpotPairId;
         bool isBuy;
-        TimeInForce tif;
-        bool reduceOnly;
         uint256 expiresAt;
     }
 
@@ -301,8 +296,6 @@ interface ILimitOrderManager {
      * @param limitPrice The limit price for HyperCore
      * @param hyperCoreSpotPairId The HyperCore spot pair ID
      * @param isBuy True for buy, false for sell
-     * @param tif Time in force for the order
-     * @param reduceOnly Whether the order is reduce-only
      * @param expiresAt Unix timestamp when the order expires (0 for no expiration)
      */
     event OrderCreated(
@@ -314,8 +307,6 @@ interface ILimitOrderManager {
         uint64 limitPrice,
         uint32 hyperCoreSpotPairId,
         bool isBuy,
-        TimeInForce tif,
-        bool reduceOnly,
         uint256 expiresAt
     );
 
@@ -367,6 +358,8 @@ interface ILimitOrderManager {
      * @param quoteAmountReceived The quote token amount received in this fill event
      * @param totalBaseFilled The cumulative total base token amount filled
      * @param totalQuoteReceived The cumulative total quote token amount received
+     * @param placedBaseAmount The total base amount that was placed on the order
+     * @param isFullyFilled Whether the order is now fully filled
      */
     event OrderFilled(
         uint256 indexed orderId,
@@ -374,21 +367,23 @@ interface ILimitOrderManager {
         uint256 baseAmountFilled,
         uint256 quoteAmountReceived,
         uint256 totalBaseFilled,
-        uint256 totalQuoteReceived
+        uint256 totalQuoteReceived,
+        uint256 placedBaseAmount,
+        bool isFullyFilled
     );
 
     /**
-     * @notice Emitted when an order is settled and funds transferred to user
+     * @notice Emitted when a fully filled order is settled and funds transferred to user
      * @param orderId The order ID
      * @param executor The address that settled the order (keeper or owner)
      * @param user The user receiving the funds
-     * @param amount The amount of tokens transferred
+     * @param filledAmount The amount of filled tokens transferred (base for buy, quote for sell)
      */
     event OrderSettled(
         uint256 indexed orderId,
         address indexed executor,
         address user,
-        uint256 amount
+        uint256 filledAmount
     );
 
     /**
@@ -449,6 +444,14 @@ interface ILimitOrderManager {
      */
     event NativeHypeRecovered(address indexed to, uint256 amount);
 
+    /**
+     * @notice Emitted when tokens are recovered from HyperCore
+     * @param tokenIndex The HyperCore token index that was recovered
+     * @param destination The address that received the tokens on HyperCore
+     * @param weiAmount The amount recovered in HyperCore wei units
+     */
+    event HyperCoreFundsRecovered(uint64 indexed tokenIndex, address indexed destination, uint64 weiAmount);
+
     // ============ User Functions ============
 
     /**
@@ -486,9 +489,12 @@ interface ILimitOrderManager {
     function cancelBridgedOrder(uint256 orderId) external;
 
     /**
-     * @notice Request cancellation of an ON_HYPERCORE order (first step of two-step cancellation)
+     * @notice Request cancellation of an ON_HYPERCORE or PARTIALLY_FILLED order (first step of two-step cancellation)
      * @dev Only callable by the order owner. Cancels the order on HyperCore and sets
      * status to CANCEL_REQUESTED. Must call finalizeCancellation() after next Core block.
+     *
+     * For PARTIALLY_FILLED orders, this cancels the remaining unfilled portion on HyperCore.
+     * The user will receive both filled tokens and unfilled refund in finalizeCancellation().
      * @param orderId The order ID to cancel
      */
     function requestCancellation(uint256 orderId) external;
@@ -547,19 +553,30 @@ interface ILimitOrderManager {
     function placeOrderOnHyperCore(uint256 orderId, uint128 cloid) external;
 
     /**
-     * @notice Report a fill from HyperCore
+     * @notice Report cumulative fill amounts from HyperCore
      * @dev Only callable by authorized keepers (not order owner). Can be called multiple times for partial fills.
      *      This is keeper-only to prevent users from reporting fake fills and draining contract funds.
-     *      Order status changes to FILLED only when fully filled (filledBaseAmount >= order amount).
+     *
+     *      Uses cumulative totals instead of incremental amounts to prevent double-counting:
+     *      - Keeper passes the total filled amounts from HyperCore
+     *      - Contract calculates the delta from previously recorded amounts
+     *      - Calling twice with the same data has no effect (delta = 0)
+     *
+     *      Order status changes to:
+     *      - PARTIALLY_FILLED: when filledBaseAmount > 0 but < placedBaseAmount
+     *      - FILLED: when filledBaseAmount >= placedBaseAmount (fully filled)
      * @param orderId The order ID that was filled
-     * @param baseAmountFilled The base token amount filled in this event (in base token decimals, e.g., 18 for HYPE)
-     * @param quoteAmountReceived The quote token amount received in this event (in quote token decimals, e.g., 6 for USDC)
+     * @param totalBaseFilledOnHyperCore The cumulative base token amount filled on HyperCore (in base token decimals)
+     * @param totalQuoteReceivedOnHyperCore The cumulative quote token amount received on HyperCore (in quote token decimals)
      */
-    function reportFill(uint256 orderId, uint256 baseAmountFilled, uint256 quoteAmountReceived) external;
+    function reportFill(uint256 orderId, uint256 totalBaseFilledOnHyperCore, uint256 totalQuoteReceivedOnHyperCore) external;
 
     /**
-     * @notice Settle a filled order and transfer funds to the user on HyperCore
+     * @notice Settle a fully filled order and transfer funds to the user on HyperCore
      * @dev Only callable by authorized keepers or the order owner.
+     *      Only works for FILLED orders (fully filled). For PARTIALLY_FILLED orders,
+     *      use requestCancellation() + finalizeCancellation() to cancel the remaining
+     *      order on HyperCore and receive both filled tokens and refund.
      *      - For sell orders: sends quote tokens (e.g., USDC when selling HYPE)
      *      - For buy orders: sends base tokens (e.g., HYPE when buying HYPE with USDC)
      * @param orderId The order ID to settle

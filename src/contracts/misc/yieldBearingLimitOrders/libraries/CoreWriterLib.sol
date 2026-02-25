@@ -12,10 +12,9 @@ import {HLConversions} from '@hyper-evm-lib/common/HLConversions.sol';
  *      Supports spot trading by bridging tokens to HyperCore and placing spot limit orders.
  */
 library CoreWriterLib {
-    /// @notice Time-in-force encoding values (re-exported from HLConstants for backwards compatibility)
-    uint8 constant TIF_ALO = HLConstants.LIMIT_ORDER_TIF_ALO;
+    /// @notice GTC (Good Till Cancel) time-in-force encoding value
+    /// @dev All orders use GTC. ALO and IOC are not supported.
     uint8 constant TIF_GTC = HLConstants.LIMIT_ORDER_TIF_GTC;
-    uint8 constant TIF_IOC = HLConstants.LIMIT_ORDER_TIF_IOC;
 
     /// @notice USDC token index on HyperCore
     uint64 constant USDC_TOKEN_INDEX = HLConstants.USDC_TOKEN_INDEX;
@@ -49,11 +48,11 @@ library CoreWriterLib {
      * @notice Place a limit order on HyperCore (works for both perps and spot)
      * @dev For spot orders, use asset ID = 10000 + spot_pair_index
      *      For perp orders, use the perp asset index directly
+     *      reduceOnly is hardcoded to false as this system only supports standard orders
      * @param asset The asset ID on HyperCore
      * @param isBuy True for buy, false for sell
      * @param limitPx Limit price (10^8 * human readable value)
      * @param sz Size in szDecimals (use evmToSz for conversion)
-     * @param reduceOnly Reduce only flag (typically false for spot)
      * @param tif Time-in-force (1=ALO, 2=GTC, 3=IOC)
      * @param cloid Client order ID (unique per user)
      */
@@ -62,11 +61,11 @@ library CoreWriterLib {
         bool isBuy,
         uint64 limitPx,
         uint64 sz,
-        bool reduceOnly,
         uint8 tif,
         uint128 cloid
     ) internal {
-        HyperEvmCoreWriterLib.placeLimitOrder(asset, isBuy, limitPx, sz, reduceOnly, tif, cloid);
+        // reduceOnly is always false for this limit order system
+        HyperEvmCoreWriterLib.placeLimitOrder(asset, isBuy, limitPx, sz, false, tif, cloid);
     }
 
     /**
@@ -102,14 +101,12 @@ library CoreWriterLib {
     }
 
     /**
-     * @notice Convert TIF enum to HyperCore encoding
-     * @param tif Time-in-force value (0=ALO, 1=GTC, 2=IOC)
-     * @return The HyperCore TIF encoding (1=ALO, 2=GTC, 3=IOC)
+     * @notice Get the GTC (Good Till Cancel) TIF encoding for HyperCore
+     * @dev All orders use GTC time-in-force. The parameter is kept for backwards compatibility.
+     * @return The HyperCore TIF encoding for GTC (2)
      */
-    function encodeTif(uint8 tif) internal pure returns (uint8) {
-        if (tif == 0) return TIF_ALO;
-        if (tif == 1) return TIF_GTC;
-        return TIF_IOC;
+    function encodeTif(uint8 /* tif */) internal pure returns (uint8) {
+        return TIF_GTC;
     }
 
     /**

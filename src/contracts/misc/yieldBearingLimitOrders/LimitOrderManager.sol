@@ -11,6 +11,7 @@ import {IAToken} from '../../interfaces/IAToken.sol';
 import {IERC20WithPermit} from '../../interfaces/IERC20WithPermit.sol';
 import {ILimitOrderManager} from './interfaces/ILimitOrderManager.sol';
 import {LimitOrderCancellation, IWHYPE} from './LimitOrderCancellation.sol';
+import {LimitOrderRecovery} from './LimitOrderRecovery.sol';
 import {CoreWriterLib} from './libraries/CoreWriterLib.sol';
 import {PrecompileLib} from '@hyper-evm-lib/PrecompileLib.sol';
 
@@ -21,7 +22,7 @@ import {PrecompileLib} from '@hyper-evm-lib/PrecompileLib.sol';
  * @dev This contract allows users to create limit orders using their aToken collateral from HyperLend.
  *
  */
-contract LimitOrderManager is LimitOrderCancellation, Ownable, Pausable {
+contract LimitOrderManager is LimitOrderCancellation, LimitOrderRecovery, Ownable, Pausable {
   using SafeERC20 for IERC20;
 
   // ============ Constants ============
@@ -288,12 +289,8 @@ contract LimitOrderManager is LimitOrderCancellation, Ownable, Pausable {
       orderSizeWei = CoreWriterLib.evmToWei(spotBaseTokenIndex, data.amount);
     }
 
-    // Encode TIF for HyperCore
-    uint8 encodedTif = CoreWriterLib.encodeTif(
-      data.tif == TimeInForce.ALO ? CoreWriterLib.TIF_ALO :
-        data.tif == TimeInForce.GTC ? CoreWriterLib.TIF_GTC :
-          CoreWriterLib.TIF_IOC
-    );
+    // All orders use GTC (Good Till Cancel) time-in-force
+    uint8 encodedTif = CoreWriterLib.encodeTif(CoreWriterLib.TIF_GTC);
 
     // Place spot limit order on HyperCore
     // The hyperCoreSpotPairId should already be in spot format (10000 + pair_index)
@@ -303,7 +300,6 @@ contract LimitOrderManager is LimitOrderCancellation, Ownable, Pausable {
       data.isBuy,
       data.limitPrice,
       orderSizeWei,
-      data.reduceOnly,
       encodedTif,
       cloid
     );
@@ -314,8 +310,18 @@ contract LimitOrderManager is LimitOrderCancellation, Ownable, Pausable {
   /**
    * @inheritdoc ILimitOrderManager
      * @dev Called by keepers to report partial or full fills from HyperCore.
-     * Can be called multiple times for partial fills. Order status changes to FILLED
-     * only when fully filled.
+     * Can be called multiple times for partial fills.
+     *
+     * Uses cumulative totals instead of incremental amounts to prevent double-counting:
+     * - Keeper passes the total filled amounts from HyperCore
+     * - Contract calculates the delta from previously recorded amounts
+     * - Calling twice with the same data has no effect (delta = 0)
+     *
+     * Status transitions:
+     * - ON_HYPERCORE -> PARTIALLY_FILLED (partial fill, filledBaseAmount < placedBaseAmount)
+     * - ON_HYPERCORE -> FILLED (full fill, filledBaseAmount >= placedBaseAmount)
+     * - PARTIALLY_FILLED -> PARTIALLY_FILLED (additional partial fill)
+     * - PARTIALLY_FILLED -> FILLED (final fill, filledBaseAmount >= placedBaseAmount)
      *
      * For sell orders: fully filled when filledBaseAmount >= placedBaseAmount (all base tokens sold)
      * For buy orders: fully filled when filledBaseAmount >= placedBaseAmount (all base tokens bought)
@@ -327,25 +333,44 @@ contract LimitOrderManager is LimitOrderCancellation, Ownable, Pausable {
      *
      * Note: This function is keeper-only (not owner) to prevent users from reporting
      * fake fills and draining funds from the contract's HyperCore balance.
+     *
+     * @param orderId The order ID that was filled
+     * @param totalBaseFilledOnHyperCore The cumulative base token amount filled on HyperCore
+     * @param totalQuoteReceivedOnHyperCore The cumulative quote token amount received on HyperCore
      */
   function reportFill(
     uint256 orderId,
-    uint256 baseAmountFilled,
-    uint256 quoteAmountReceived
+    uint256 totalBaseFilledOnHyperCore,
+    uint256 totalQuoteReceivedOnHyperCore
   ) external override onlyKeeper {
     OrderState storage state = orderStates[orderId];
-    if (state.status != OrderStatus.ON_HYPERCORE) {
+    // Allow reporting fills on ON_HYPERCORE or PARTIALLY_FILLED orders
+    if (state.status != OrderStatus.ON_HYPERCORE && state.status != OrderStatus.PARTIALLY_FILLED) {
       revert OrderNotOnHyperCore();
     }
 
-    state.filledBaseAmount += baseAmountFilled;
-    state.filledQuoteAmount += quoteAmountReceived;
+    // Validate cumulative totals are >= what we've already recorded (no going backwards)
+    if (totalBaseFilledOnHyperCore < state.filledBaseAmount) revert InvalidFillAmount();
+    if (totalQuoteReceivedOnHyperCore < state.filledQuoteAmount) revert InvalidFillAmount();
 
-    // Only mark as FILLED when fully filled
-    // Both buy and sell orders are fully filled when all base tokens have been traded
-    // placedBaseAmount is set in placeOrderOnHyperCore based on order type
-    if (state.filledBaseAmount >= state.placedBaseAmount) {
+    // Calculate incremental fill amounts for this report (for event emission)
+    uint256 baseAmountFilled = totalBaseFilledOnHyperCore - state.filledBaseAmount;
+    uint256 quoteAmountReceived = totalQuoteReceivedOnHyperCore - state.filledQuoteAmount;
+
+    // Update to new cumulative totals
+    state.filledBaseAmount = totalBaseFilledOnHyperCore;
+    state.filledQuoteAmount = totalQuoteReceivedOnHyperCore;
+
+    // Determine new status based on fill completion
+    // Order is FILLED when fully filled (filledBaseAmount >= placedBaseAmount)
+    bool isFullyFilled = state.placedBaseAmount > 0 && state.filledBaseAmount >= state.placedBaseAmount;
+
+    if (isFullyFilled) {
+      // Order is complete (fully filled)
       state.status = OrderStatus.FILLED;
+    } else if (state.filledBaseAmount > 0) {
+      // Partial fill, waiting for more fills
+      state.status = OrderStatus.PARTIALLY_FILLED;
     }
 
     emit OrderFilled(
@@ -354,54 +379,47 @@ contract LimitOrderManager is LimitOrderCancellation, Ownable, Pausable {
       baseAmountFilled,
       quoteAmountReceived,
       state.filledBaseAmount,
-      state.filledQuoteAmount
+      state.filledQuoteAmount,
+      state.placedBaseAmount,
+      isFullyFilled
     );
   }
 
   /**
    * @inheritdoc ILimitOrderManager
      * @dev Called by keepers or the order owner to settle a filled order and transfer funds to the user on HyperCore.
-     * - For sell orders: sends quote tokens (e.g., USDC when selling HYPE)
-     * - For buy orders: sends base tokens (e.g., HYPE when buying HYPE with USDC)
-     * The amount transferred is based on state.filledQuoteAmount (sell) or state.filledBaseAmount (buy).
+     * Handles both fully filled and partially filled orders (GTC/IOC that were cancelled with partial fill).
+     *
+     * For sell orders:
+     *   - Filled tokens: quote tokens (e.g., USDC received from selling HYPE)
+     *   - Unfilled tokens: base tokens (e.g., unsold HYPE returned to user)
+     *
+     * For buy orders:
+     *   - Filled tokens: base tokens (e.g., HYPE bought with USDC)
+     *   - Unfilled tokens: quote tokens (e.g., unused USDC returned to user)
      *
      * @param orderId The order ID to settle
      */
   function settleOrder(uint256 orderId) external override onlyKeeperOrOwner(orderId) nonReentrant {
     OrderData storage data = orderData[orderId];
     OrderState storage state = orderStates[orderId];
-    if (state.status != OrderStatus.FILLED) revert OrderNotFilled();
+    if (state.status != OrderStatus.FILLED) {
+      revert OrderNotSettleable();
+    }
 
     state.status = OrderStatus.SETTLED;
 
-    uint64 spotTokenIndex;
-    uint256 amount;
+    // For fully filled orders, send the filled tokens to user
+    // Buy order: send base tokens (what they bought)
+    // Sell order: send quote tokens (what they received)
+    uint64 tokenIndex = data.isBuy
+      ? _getSpotBaseTokenIndex(data.hyperCoreSpotPairId)
+      : _getSpotQuoteTokenIndex(data.hyperCoreSpotPairId);
+    uint256 filledAmount = data.isBuy ? state.filledBaseAmount : state.filledQuoteAmount;
 
-    if (data.isBuy) {
-      // Buy order: user bought spot base tokens (e.g., bought HYPE with USDC)
-      // Send the filled spot base amount to user
-      spotTokenIndex = _getSpotBaseTokenIndex(data.hyperCoreSpotPairId);
-      amount = state.filledBaseAmount;
-    } else {
-      // Sell order: user sold spot base tokens for spot quote tokens (e.g., sold HYPE for USDC)
-      // Send the filled spot quote amount to user
-      spotTokenIndex = _getSpotQuoteTokenIndex(data.hyperCoreSpotPairId);
-      amount = state.filledQuoteAmount;
-    }
+    _sendTokensOnHyperCore(data.user, tokenIndex, filledAmount);
 
-    // Send tokens to user on HyperCore via spotSend
-    // Convert EVM amount to HyperCore wei for spotSend
-    uint64 weiAmount = CoreWriterLib.evmToWei(spotTokenIndex, amount);
-
-    // Verify contract has sufficient balance on HyperCore before sending
-    // This prevents failures due to fees deducted by HyperCore during trading
-    // The keeper should report the NET amount (after fees) in reportFill
-    PrecompileLib.SpotBalance memory balance = PrecompileLib.spotBalance(address(this), spotTokenIndex);
-    if (balance.total < weiAmount) revert InsufficientHyperCoreBalance();
-
-    CoreWriterLib.spotSend(data.user, spotTokenIndex, weiAmount);
-
-    emit OrderSettled(orderId, msg.sender, data.user, amount);
+    emit OrderSettled(orderId, msg.sender, data.user, filledAmount);
   }
 
   /**
@@ -484,8 +502,6 @@ contract LimitOrderManager is LimitOrderCancellation, Ownable, Pausable {
     data.aToken = params.aToken;
     data.limitPrice = params.limitPrice;
     data.isBuy = params.isBuy;
-    data.tif = params.tif;
-    data.reduceOnly = params.reduceOnly;
     data.underlyingToken = underlyingToken;
     data.amount = params.amount;
     data.expiresAt = params.expiresAt;
@@ -504,8 +520,6 @@ contract LimitOrderManager is LimitOrderCancellation, Ownable, Pausable {
       params.limitPrice,
       params.hyperCoreSpotPairId,
       params.isBuy,
-      params.tif,
-      params.reduceOnly,
       params.expiresAt
     );
   }
@@ -535,6 +549,11 @@ contract LimitOrderManager is LimitOrderCancellation, Ownable, Pausable {
     return authorizedKeepers[msg.sender] || orderData[orderId].user == msg.sender;
   }
 
+  /// @inheritdoc LimitOrderRecovery
+  function _isOwner() internal view override returns (bool) {
+    return msg.sender == owner();
+  }
+
   // ============ Admin Functions ============
 
   /**
@@ -552,36 +571,5 @@ contract LimitOrderManager is LimitOrderCancellation, Ownable, Pausable {
    */
   function unpause() external override onlyOwner {
     _unpause();
-  }
-
-  /**
-   * @notice Recover ERC20 tokens accidentally sent to this contract
-   * @dev Only callable by the contract owner. This is an emergency function to recover
-   *      tokens that were accidentally sent to the contract address.
-   *      WARNING: Use with caution - ensure the tokens are not part of active orders.
-   * @param token The ERC20 token address to recover
-   * @param to The address to send the recovered tokens to
-   * @param amount The amount of tokens to recover
-   */
-  function recoverERC20(address token, address to, uint256 amount) external onlyOwner {
-    if (to == address(0)) revert ZeroAddress();
-    IERC20(token).safeTransfer(to, amount);
-    emit TokensRecovered(token, to, amount);
-  }
-
-  /**
-   * @notice Recover native HYPE accidentally sent to this contract
-   * @dev Only callable by the contract owner. This is an emergency function to recover
-   *      native HYPE that was accidentally sent to the contract address.
-   *      WARNING: Use with caution - ensure the HYPE is not part of active orders
-   *      (e.g., from WHYPE unwrap waiting to be bridged).
-   * @param to The address to send the recovered HYPE to
-   * @param amount The amount of native HYPE to recover
-   */
-  function recoverNativeHYPE(address payable to, uint256 amount) external onlyOwner {
-    if (to == address(0)) revert ZeroAddress();
-    (bool success, ) = to.call{value: amount}("");
-    if (!success) revert NativeHypeTransferFailed();
-    emit NativeHypeRecovered(to, amount);
   }
 }

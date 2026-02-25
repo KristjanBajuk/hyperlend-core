@@ -60,8 +60,7 @@ contract LimitOrderManagerTest is Test {
         uint64 limitPrice,
         uint32 hyperCoreSpotPairId,
         bool isBuy,
-        ILimitOrderManager.TimeInForce tif,
-        bool reduceOnly
+        uint256 expiresAt
     );
     event OrderTriggered(uint256 indexed orderId, address indexed executor, uint256 withdrawnAmount);
     event OrderCancelled(uint256 indexed orderId, address indexed user);
@@ -122,8 +121,6 @@ contract LimitOrderManagerTest is Test {
             limitPrice: 21e8,   // Price for the limit order on HyperCore
             hyperCoreSpotPairId: HYPE_USDC_SPOT_PAIR_ID,
             isBuy: true,
-            tif: ILimitOrderManager.TimeInForce.GTC,
-            reduceOnly: false,
             expiresAt: 0 // No expiration
         });
     }
@@ -244,15 +241,13 @@ contract LimitOrderManagerTest is Test {
                 limitPrice: 21e8,
                 hyperCoreSpotPairId: HYPE_USDC_SPOT_PAIR_ID,
                 isBuy: true,
-                tif: ILimitOrderManager.TimeInForce.GTC,
-                reduceOnly: false,
                 expiresAt: 0
             })
         );
 
         assertEq(orderId, 1, "First order should have ID 1");
 
-        // Access order data via public mapping getter (G-3: struct fields reordered for optimal packing)
+        // Access order data via public mapping getter
         (
             address orderUser,
             uint64 orderTriggerPrice,
@@ -260,8 +255,6 @@ contract LimitOrderManagerTest is Test {
             address orderAToken,
             uint64 orderLimitPrice,
             bool orderIsBuy,
-            ILimitOrderManager.TimeInForce orderTif,
-            bool orderReduceOnly,
             address orderUnderlying,
             uint256 orderAmount,
             uint256 orderExpiresAt
@@ -294,13 +287,11 @@ contract LimitOrderManagerTest is Test {
                 limitPrice: 24e8,
                 hyperCoreSpotPairId: HYPE_USDC_SPOT_PAIR_ID,
                 isBuy: false,
-                tif: ILimitOrderManager.TimeInForce.GTC,
-                reduceOnly: false,
                 expiresAt: 0
             })
         );
 
-        (,,,,,,,bool orderIsBuy,,,) = limitOrderManager.orderData(orderId);
+        (,,,,,bool orderIsBuy,,,) = limitOrderManager.orderData(orderId);
         assertFalse(orderIsBuy, "Should be a sell order");
     }
 
@@ -315,47 +306,6 @@ contract LimitOrderManagerTest is Test {
         assertEq(limitOrderManager.orderCounter(), 3, "Order count should be 3");
     }
 
-    function test_createOrder_differentTimeInForce() public {
-        // Test ALO
-        vm.prank(user1);
-        uint256 orderId1 = limitOrderManager.createOrder(
-            ILimitOrderManager.CreateOrderParams({
-                aToken: address(aToken),
-                amount: 100e18,
-                triggerPrice: 20e8,
-                limitPrice: 21e8,
-                hyperCoreSpotPairId: HYPE_USDC_SPOT_PAIR_ID,
-                isBuy: true,
-                tif: ILimitOrderManager.TimeInForce.ALO,
-                reduceOnly: false,
-                expiresAt: 0
-            })
-        );
-
-        // Test IOC
-        vm.prank(user1);
-        uint256 orderId2 = limitOrderManager.createOrder(
-            ILimitOrderManager.CreateOrderParams({
-                aToken: address(aToken),
-                amount: 100e18,
-                triggerPrice: 20e8,
-                limitPrice: 21e8,
-                hyperCoreSpotPairId: HYPE_USDC_SPOT_PAIR_ID,
-                isBuy: true,
-                tif: ILimitOrderManager.TimeInForce.IOC,
-                reduceOnly: false,
-                expiresAt: 0
-            })
-        );
-
-        // G-3: struct fields reordered - tif is at position 6 (0-indexed)
-        (,,,,, , ILimitOrderManager.TimeInForce tif1,,,,) = limitOrderManager.orderData(orderId1);
-        (,,,,, , ILimitOrderManager.TimeInForce tif2,,,,) = limitOrderManager.orderData(orderId2);
-
-        assertEq(uint8(tif1), uint8(ILimitOrderManager.TimeInForce.ALO), "Should be ALO");
-        assertEq(uint8(tif2), uint8(ILimitOrderManager.TimeInForce.IOC), "Should be IOC");
-    }
-
     function test_createOrder_revert_zeroAmount() public {
         vm.prank(user1);
         vm.expectRevert(ILimitOrderManager.ZeroAmount.selector);
@@ -367,8 +317,6 @@ contract LimitOrderManagerTest is Test {
                 limitPrice: 21e8,
                 hyperCoreSpotPairId: HYPE_USDC_SPOT_PAIR_ID,
                 isBuy: true,
-                tif: ILimitOrderManager.TimeInForce.GTC,
-                reduceOnly: false,
                 expiresAt: 0
             })
         );
@@ -385,8 +333,6 @@ contract LimitOrderManagerTest is Test {
                 limitPrice: 21e8,
                 hyperCoreSpotPairId: HYPE_USDC_SPOT_PAIR_ID,
                 isBuy: true,
-                tif: ILimitOrderManager.TimeInForce.GTC,
-                reduceOnly: false,
                 expiresAt: 0
             })
         );
@@ -420,8 +366,6 @@ contract LimitOrderManagerTest is Test {
                 limitPrice: 21e8,
                 hyperCoreSpotPairId: HYPE_USDC_SPOT_PAIR_ID,
                 isBuy: true,
-                tif: ILimitOrderManager.TimeInForce.GTC,
-                reduceOnly: false,
                 expiresAt: 0
             })
         );
@@ -515,7 +459,7 @@ contract LimitOrderManagerTest is Test {
 
         // G-3: Struct fields reordered for optimal packing
         // Slot 1: user (20) + triggerPrice (8) + hyperCoreSpotPairId (4) = 32 bytes
-        // Slot 2: aToken (20) + limitPrice (8) + isBuy (1) + tif (1) + reduceOnly (1) = 31 bytes
+        // Slot 2: aToken (20) + limitPrice (8) + isBuy (1) = 29 bytes
         // Slot 3: underlyingToken (20) = 20 bytes
         // Slot 4: amount (32) = 32 bytes
         // Slot 5: expiresAt (32) = 32 bytes
@@ -526,8 +470,6 @@ contract LimitOrderManagerTest is Test {
             address orderAToken,
             uint64 orderLimitPrice,
             bool orderIsBuy,
-            ILimitOrderManager.TimeInForce orderTif,
-            bool orderReduceOnly,
             address orderUnderlying,
             uint256 orderAmount,
             uint256 orderExpiresAt
@@ -609,14 +551,12 @@ contract LimitOrderManagerTest is Test {
                 limitPrice: 21e8,
                 hyperCoreSpotPairId: HYPE_USDC_SPOT_PAIR_ID,
                 isBuy: true,
-                tif: ILimitOrderManager.TimeInForce.GTC,
-                reduceOnly: false,
                 expiresAt: 0
             })
         );
 
-        // G-3: struct fields reordered - amount is at position 9 (0-indexed)
-        (,,,,,,,,,uint256 orderAmount,) = limitOrderManager.orderData(orderId);
+        // Struct fields: user, triggerPrice, spotPairId, aToken, limitPrice, isBuy, underlying, amount, expiresAt
+        (,,,,,,,uint256 orderAmount,) = limitOrderManager.orderData(orderId);
         assertEq(orderAmount, amount, "Amount should match");
     }
 
@@ -638,14 +578,12 @@ contract LimitOrderManagerTest is Test {
                 limitPrice: limitPrice,
                 hyperCoreSpotPairId: HYPE_USDC_SPOT_PAIR_ID,
                 isBuy: true,
-                tif: ILimitOrderManager.TimeInForce.GTC,
-                reduceOnly: false,
                 expiresAt: 0
             })
         );
 
-        // G-3: struct fields reordered - triggerPrice at position 1, limitPrice at position 4
-        (,uint64 orderTriggerPrice,,,uint64 orderLimitPrice,,,,,,) = limitOrderManager.orderData(orderId);
+        // Struct fields: user, triggerPrice, spotPairId, aToken, limitPrice, isBuy, underlying, amount, expiresAt
+        (,uint64 orderTriggerPrice,,,uint64 orderLimitPrice,,,,) = limitOrderManager.orderData(orderId);
         assertEq(orderTriggerPrice, triggerPrice, "Trigger price should match");
         assertEq(orderLimitPrice, limitPrice, "Limit price should match");
     }
@@ -736,9 +674,10 @@ contract LimitOrderManagerTest is Test {
     // with a panic (0x21), so no explicit validation test is needed.
 
     // ============================================
-    // REPORT FILL TESTS
+    // REPORT FILL TESTS (Cumulative Totals)
     // ============================================
 
+    /// @notice Test reportFill with cumulative totals on ON_HYPERCORE order
     function test_reportFill_onHyperCoreOrder() public {
         uint256 orderId = _createOrder(user1);
 
@@ -746,15 +685,48 @@ contract LimitOrderManagerTest is Test {
         vm.prank(keeper);
         limitOrderManager.setOrderStatus(orderId, ILimitOrderManager.OrderStatus.ON_HYPERCORE);
 
-        // Report a partial fill
+        // Report a partial fill with cumulative totals
         vm.prank(keeper);
         limitOrderManager.reportFill(orderId, 50e18, 1000e6);
 
-        (,,,,,uint256 filledBaseAmount, uint256 filledQuoteAmount,) = limitOrderManager.orderStates(orderId);
+        (ILimitOrderManager.OrderStatus status,,,,, uint256 filledBaseAmount, uint256 filledQuoteAmount,) = limitOrderManager.orderStates(orderId);
         assertEq(filledBaseAmount, 50e18, "Filled base amount should be 50e18");
         assertEq(filledQuoteAmount, 1000e6, "Filled quote amount should be 1000e6");
+        // Status should be PARTIALLY_FILLED since filledBaseAmount > 0 but < placedBaseAmount
+        assertEq(uint8(status), uint8(ILimitOrderManager.OrderStatus.PARTIALLY_FILLED), "Status should be PARTIALLY_FILLED");
     }
 
+    /// @notice Test multiple reportFill calls with cumulative totals
+    /// @dev reportFill now takes cumulative totals, not incremental amounts
+    function test_reportFill_partialFillToFilled() public {
+        uint256 orderId = _createOrder(user1);
+
+        // Set order to ON_HYPERCORE status
+        vm.prank(keeper);
+        limitOrderManager.setOrderStatus(orderId, ILimitOrderManager.OrderStatus.ON_HYPERCORE);
+
+        // Report first partial fill (cumulative total: 30e18, 600e6)
+        vm.prank(keeper);
+        limitOrderManager.reportFill(orderId, 30e18, 600e6);
+
+        // Verify status is PARTIALLY_FILLED
+        (ILimitOrderManager.OrderStatus status1,,,,,,,) = limitOrderManager.orderStates(orderId);
+        assertEq(uint8(status1), uint8(ILimitOrderManager.OrderStatus.PARTIALLY_FILLED), "Status should be PARTIALLY_FILLED after first fill");
+
+        // Report second fill with NEW cumulative totals (not incremental!)
+        // Total filled is now 100e18 base and 2000e6 quote
+        vm.prank(keeper);
+        limitOrderManager.reportFill(orderId, 100e18, 2000e6);
+
+        // Verify fill amounts are the cumulative totals
+        (ILimitOrderManager.OrderStatus status2,,,,, uint256 filledBaseAmount, uint256 filledQuoteAmount,) = limitOrderManager.orderStates(orderId);
+        assertEq(filledBaseAmount, 100e18, "Filled base amount should be 100e18");
+        assertEq(filledQuoteAmount, 2000e6, "Filled quote amount should be 2000e6");
+        // Status stays PARTIALLY_FILLED since placedBaseAmount is 0 (not set via placeOrderOnHyperCore)
+        assertEq(uint8(status2), uint8(ILimitOrderManager.OrderStatus.PARTIALLY_FILLED), "Status should be PARTIALLY_FILLED");
+    }
+
+    /// @notice Test reportFill records cumulative totals correctly
     function test_reportFill_multipleFills() public {
         uint256 orderId = _createOrder(user1);
 
@@ -762,8 +734,7 @@ contract LimitOrderManagerTest is Test {
         vm.prank(keeper);
         limitOrderManager.setOrderStatus(orderId, ILimitOrderManager.OrderStatus.ON_HYPERCORE);
 
-        // Report first fill - this will mark order as FILLED since placedBaseAmount is 0
-        // and filledBaseAmount (30e18) >= placedBaseAmount (0)
+        // Report first fill with cumulative totals
         vm.prank(keeper);
         limitOrderManager.reportFill(orderId, 30e18, 600e6);
 
@@ -772,11 +743,47 @@ contract LimitOrderManagerTest is Test {
         assertEq(filledBaseAmount, 30e18, "Filled base amount should be 30e18");
         assertEq(filledQuoteAmount, 600e6, "Filled quote amount should be 600e6");
 
-        // Order should be FILLED now (since filledBaseAmount >= placedBaseAmount which is 0)
-        assertEq(uint8(status), uint8(ILimitOrderManager.OrderStatus.FILLED), "Status should be FILLED");
+        // Order should be PARTIALLY_FILLED since filledBaseAmount < placedBaseAmount
+        assertEq(uint8(status), uint8(ILimitOrderManager.OrderStatus.PARTIALLY_FILLED), "Status should be PARTIALLY_FILLED");
+    }
 
-        // Note: With LE-1 fix, we can't report additional fills on FILLED orders
-        // This is the correct behavior - once filled, no more fills should be reported
+    /// @notice Test reportFill on PARTIALLY_FILLED order with cumulative totals
+    function test_reportFill_onPartiallyFilledOrder() public {
+        uint256 orderId = _createOrder(user1);
+
+        // Set order to PARTIALLY_FILLED status
+        vm.prank(keeper);
+        limitOrderManager.setOrderStatus(orderId, ILimitOrderManager.OrderStatus.PARTIALLY_FILLED);
+
+        // Report fill with cumulative totals on PARTIALLY_FILLED order (should work)
+        vm.prank(keeper);
+        limitOrderManager.reportFill(orderId, 25e18, 500e6);
+
+        (ILimitOrderManager.OrderStatus status,,,,, uint256 filledBaseAmount, uint256 filledQuoteAmount,) = limitOrderManager.orderStates(orderId);
+        assertEq(filledBaseAmount, 25e18, "Filled base amount should be 25e18");
+        assertEq(filledQuoteAmount, 500e6, "Filled quote amount should be 500e6");
+        // Still PARTIALLY_FILLED since filledBaseAmount < placedBaseAmount
+        assertEq(uint8(status), uint8(ILimitOrderManager.OrderStatus.PARTIALLY_FILLED), "Status should still be PARTIALLY_FILLED");
+    }
+
+    /// @notice Test reportFill on PARTIALLY_FILLED order updates to new cumulative totals
+    function test_reportFill_partiallyFilledToFilled() public {
+        uint256 orderId = _createOrder(user1);
+
+        // Set order to PARTIALLY_FILLED status (simulating previous partial fill)
+        vm.prank(keeper);
+        limitOrderManager.setOrderStatus(orderId, ILimitOrderManager.OrderStatus.PARTIALLY_FILLED);
+
+        // Report fill with cumulative totals
+        vm.prank(keeper);
+        limitOrderManager.reportFill(orderId, 100e18, 2000e6);
+
+        (ILimitOrderManager.OrderStatus status,,,,, uint256 filledBaseAmount, uint256 filledQuoteAmount,) = limitOrderManager.orderStates(orderId);
+        // Verify fill amounts are recorded
+        assertEq(filledBaseAmount, 100e18, "Filled base amount should be recorded");
+        assertEq(filledQuoteAmount, 2000e6, "Filled quote amount should be recorded");
+        // Status stays PARTIALLY_FILLED since placedBaseAmount is 0 (not set via placeOrderOnHyperCore)
+        assertEq(uint8(status), uint8(ILimitOrderManager.OrderStatus.PARTIALLY_FILLED), "Status should be PARTIALLY_FILLED");
     }
 
     /// @notice Test that reportFill reverts on FILLED orders (LE-1 fix)
@@ -824,6 +831,168 @@ contract LimitOrderManagerTest is Test {
         vm.prank(keeper);
         vm.expectRevert(ILimitOrderManager.OrderNotOnHyperCore.selector);
         limitOrderManager.reportFill(orderId, 50e18, 1000e6);
+    }
+
+    // ============================================
+    // CUMULATIVE TOTALS - DOUBLE FILL PREVENTION TESTS
+    // ============================================
+
+    /// @notice Test that calling reportFill twice with the same cumulative totals has no effect
+    /// @dev This is the key feature - prevents double-counting if keeper reports same fill twice
+    function test_reportFill_duplicateReportHasNoEffect() public {
+        uint256 orderId = _createOrder(user1);
+
+        // Set order to ON_HYPERCORE status
+        vm.prank(keeper);
+        limitOrderManager.setOrderStatus(orderId, ILimitOrderManager.OrderStatus.ON_HYPERCORE);
+
+        // Report first fill with cumulative totals
+        vm.prank(keeper);
+        limitOrderManager.reportFill(orderId, 50e18, 1000e6);
+
+        // Verify fill amounts
+        (,,,,, uint256 filledBaseAmount1, uint256 filledQuoteAmount1,) = limitOrderManager.orderStates(orderId);
+        assertEq(filledBaseAmount1, 50e18, "First fill: base amount should be 50e18");
+        assertEq(filledQuoteAmount1, 1000e6, "First fill: quote amount should be 1000e6");
+
+        // Report SAME cumulative totals again (simulating duplicate report)
+        vm.prank(keeper);
+        limitOrderManager.reportFill(orderId, 50e18, 1000e6);
+
+        // Verify fill amounts are UNCHANGED (no double-counting)
+        (,,,,, uint256 filledBaseAmount2, uint256 filledQuoteAmount2,) = limitOrderManager.orderStates(orderId);
+        assertEq(filledBaseAmount2, 50e18, "After duplicate: base amount should still be 50e18");
+        assertEq(filledQuoteAmount2, 1000e6, "After duplicate: quote amount should still be 1000e6");
+    }
+
+    /// @notice Test that reportFill reverts when base amount goes backwards
+    function test_reportFill_revert_baseAmountGoesBackwards() public {
+        uint256 orderId = _createOrder(user1);
+
+        // Set order to ON_HYPERCORE status
+        vm.prank(keeper);
+        limitOrderManager.setOrderStatus(orderId, ILimitOrderManager.OrderStatus.ON_HYPERCORE);
+
+        // Report first fill
+        vm.prank(keeper);
+        limitOrderManager.reportFill(orderId, 50e18, 1000e6);
+
+        // Try to report with LOWER base amount (should revert)
+        vm.prank(keeper);
+        vm.expectRevert(ILimitOrderManager.InvalidFillAmount.selector);
+        limitOrderManager.reportFill(orderId, 40e18, 1000e6);
+    }
+
+    /// @notice Test that reportFill reverts when quote amount goes backwards
+    function test_reportFill_revert_quoteAmountGoesBackwards() public {
+        uint256 orderId = _createOrder(user1);
+
+        // Set order to ON_HYPERCORE status
+        vm.prank(keeper);
+        limitOrderManager.setOrderStatus(orderId, ILimitOrderManager.OrderStatus.ON_HYPERCORE);
+
+        // Report first fill
+        vm.prank(keeper);
+        limitOrderManager.reportFill(orderId, 50e18, 1000e6);
+
+        // Try to report with LOWER quote amount (should revert)
+        vm.prank(keeper);
+        vm.expectRevert(ILimitOrderManager.InvalidFillAmount.selector);
+        limitOrderManager.reportFill(orderId, 50e18, 800e6);
+    }
+
+    /// @notice Test that reportFill reverts when both amounts go backwards
+    function test_reportFill_revert_bothAmountsGoBackwards() public {
+        uint256 orderId = _createOrder(user1);
+
+        // Set order to ON_HYPERCORE status
+        vm.prank(keeper);
+        limitOrderManager.setOrderStatus(orderId, ILimitOrderManager.OrderStatus.ON_HYPERCORE);
+
+        // Report first fill
+        vm.prank(keeper);
+        limitOrderManager.reportFill(orderId, 50e18, 1000e6);
+
+        // Try to report with LOWER amounts (should revert on base amount check first)
+        vm.prank(keeper);
+        vm.expectRevert(ILimitOrderManager.InvalidFillAmount.selector);
+        limitOrderManager.reportFill(orderId, 30e18, 500e6);
+    }
+
+    /// @notice Test incremental fill reporting with cumulative totals
+    /// @dev Simulates realistic keeper behavior: report cumulative totals after each fill
+    function test_reportFill_incrementalFillsWithCumulativeTotals() public {
+        uint256 orderId = _createOrder(user1);
+
+        // Set order to ON_HYPERCORE status
+        vm.prank(keeper);
+        limitOrderManager.setOrderStatus(orderId, ILimitOrderManager.OrderStatus.ON_HYPERCORE);
+
+        // First fill: 20e18 base, 400e6 quote
+        vm.prank(keeper);
+        limitOrderManager.reportFill(orderId, 20e18, 400e6);
+
+        (,,,,, uint256 filled1,,) = limitOrderManager.orderStates(orderId);
+        assertEq(filled1, 20e18, "After fill 1: base should be 20e18");
+
+        // Second fill: additional 30e18 base, 600e6 quote
+        // Cumulative: 50e18 base, 1000e6 quote
+        vm.prank(keeper);
+        limitOrderManager.reportFill(orderId, 50e18, 1000e6);
+
+        (,,,,, uint256 filled2,,) = limitOrderManager.orderStates(orderId);
+        assertEq(filled2, 50e18, "After fill 2: base should be 50e18");
+
+        // Third fill: additional 50e18 base, 1000e6 quote
+        // Cumulative: 100e18 base, 2000e6 quote
+        vm.prank(keeper);
+        limitOrderManager.reportFill(orderId, 100e18, 2000e6);
+
+        (,,,,, uint256 filled3, uint256 quote3,) = limitOrderManager.orderStates(orderId);
+        assertEq(filled3, 100e18, "After fill 3: base should be 100e18");
+        assertEq(quote3, 2000e6, "After fill 3: quote should be 2000e6");
+    }
+
+    /// @notice Test that only base amount can increase while quote stays same
+    function test_reportFill_onlyBaseIncreases() public {
+        uint256 orderId = _createOrder(user1);
+
+        // Set order to ON_HYPERCORE status
+        vm.prank(keeper);
+        limitOrderManager.setOrderStatus(orderId, ILimitOrderManager.OrderStatus.ON_HYPERCORE);
+
+        // Report first fill
+        vm.prank(keeper);
+        limitOrderManager.reportFill(orderId, 50e18, 1000e6);
+
+        // Report with higher base but same quote (valid - quote can stay same)
+        vm.prank(keeper);
+        limitOrderManager.reportFill(orderId, 60e18, 1000e6);
+
+        (,,,,, uint256 filledBase, uint256 filledQuote,) = limitOrderManager.orderStates(orderId);
+        assertEq(filledBase, 60e18, "Base should be updated to 60e18");
+        assertEq(filledQuote, 1000e6, "Quote should remain 1000e6");
+    }
+
+    /// @notice Test that only quote amount can increase while base stays same
+    function test_reportFill_onlyQuoteIncreases() public {
+        uint256 orderId = _createOrder(user1);
+
+        // Set order to ON_HYPERCORE status
+        vm.prank(keeper);
+        limitOrderManager.setOrderStatus(orderId, ILimitOrderManager.OrderStatus.ON_HYPERCORE);
+
+        // Report first fill
+        vm.prank(keeper);
+        limitOrderManager.reportFill(orderId, 50e18, 1000e6);
+
+        // Report with same base but higher quote (valid - base can stay same)
+        vm.prank(keeper);
+        limitOrderManager.reportFill(orderId, 50e18, 1200e6);
+
+        (,,,,, uint256 filledBase, uint256 filledQuote,) = limitOrderManager.orderStates(orderId);
+        assertEq(filledBase, 50e18, "Base should remain 50e18");
+        assertEq(filledQuote, 1200e6, "Quote should be updated to 1200e6");
     }
 
     // ============================================
@@ -897,7 +1066,7 @@ contract LimitOrderManagerTest is Test {
 
         // Order is still PENDING
         vm.prank(keeper);
-        vm.expectRevert(ILimitOrderManager.OrderNotFilled.selector);
+        vm.expectRevert(ILimitOrderManager.OrderNotSettleable.selector);
         limitOrderManager.settleOrder(orderId);
     }
 
@@ -909,7 +1078,7 @@ contract LimitOrderManagerTest is Test {
         limitOrderManager.setOrderStatus(orderId, ILimitOrderManager.OrderStatus.ON_HYPERCORE);
 
         vm.prank(keeper);
-        vm.expectRevert(ILimitOrderManager.OrderNotFilled.selector);
+        vm.expectRevert(ILimitOrderManager.OrderNotSettleable.selector);
         limitOrderManager.settleOrder(orderId);
     }
 
@@ -929,27 +1098,6 @@ contract LimitOrderManagerTest is Test {
     // ============================================
     // EDGE CASE TESTS
     // ============================================
-
-    function test_createOrder_reduceOnlyFlag() public {
-        vm.prank(user1);
-        uint256 orderId = limitOrderManager.createOrder(
-            ILimitOrderManager.CreateOrderParams({
-                aToken: address(aToken),
-                amount: 100e18,
-                triggerPrice: 20e8,
-                limitPrice: 21e8,
-                hyperCoreSpotPairId: HYPE_USDC_SPOT_PAIR_ID,
-                isBuy: true,
-                tif: ILimitOrderManager.TimeInForce.GTC,
-                reduceOnly: true,
-                expiresAt: 0
-            })
-        );
-
-        // G-3: struct fields reordered - reduceOnly at position 7
-        (,,,,,,,bool orderReduceOnly,,,) = limitOrderManager.orderData(orderId);
-        assertTrue(orderReduceOnly, "reduceOnly should be true");
-    }
 
     function test_executeOrder_emitsEvent() public {
         uint256 orderId = _createOrder(user1);
@@ -1031,43 +1179,17 @@ contract LimitOrderManagerTest is Test {
                 limitPrice: 24e8, // Lower limit for sell
                 hyperCoreSpotPairId: HYPE_USDC_SPOT_PAIR_ID,
                 isBuy: false,
-                tif: ILimitOrderManager.TimeInForce.IOC,
-                reduceOnly: true,
                 expiresAt: 0
             })
         );
 
-        // G-3: struct fields reordered for optimal packing
+        // Struct fields: user, triggerPrice, spotPairId, aToken, limitPrice, isBuy, underlying, amount, expiresAt
         (address user, uint64 triggerPrice, uint32 hyperCoreSpotPairId, address orderAToken,
-         uint64 limitPrice, bool isBuy, ILimitOrderManager.TimeInForce tif, bool reduceOnly,
+         uint64 limitPrice, bool isBuy,
          address underlyingToken, uint256 amount, uint256 expiresAt) = limitOrderManager.orderData(orderId);
 
         assertEq(user, user1);
         assertEq(isBuy, false);
-        assertEq(reduceOnly, true);
-        assertEq(uint8(tif), uint8(ILimitOrderManager.TimeInForce.IOC));
-    }
-
-    /// @notice Test createOrder with ALO time in force
-    function test_createOrder_withALO() public {
-        vm.prank(user1);
-        uint256 orderId = limitOrderManager.createOrder(
-            ILimitOrderManager.CreateOrderParams({
-                aToken: address(aToken),
-                amount: 50e18,
-                triggerPrice: 25e8,
-                limitPrice: 26e8,
-                hyperCoreSpotPairId: HYPE_USDC_SPOT_PAIR_ID,
-                isBuy: true,
-                tif: ILimitOrderManager.TimeInForce.ALO,
-                reduceOnly: false,
-                expiresAt: 0
-            })
-        );
-
-        // G-3: struct fields reordered - tif at position 6
-        (,,,,,, ILimitOrderManager.TimeInForce tif,,,,) = limitOrderManager.orderData(orderId);
-        assertEq(uint8(tif), uint8(ILimitOrderManager.TimeInForce.ALO));
     }
 
     /// @notice Test setOrderStatus with FAILED_ON_EVM status
@@ -1178,34 +1300,6 @@ contract LimitOrderManagerTest is Test {
         limitOrderManager.executeOrder(999);
     }
 
-    /// @notice Test createOrder with ALO time in force
-    function test_createOrder_withALO_tif() public {
-        ILimitOrderManager.CreateOrderParams memory params = _createDefaultOrderParams();
-        params.tif = ILimitOrderManager.TimeInForce.ALO;
-
-        vm.prank(user1);
-        uint256 orderId = limitOrderManager.createOrder(params);
-
-        // Verify TIF is stored correctly
-        // OrderData: user, triggerPrice, hyperCoreSpotPairId, aToken, limitPrice, isBuy, tif, reduceOnly, underlyingToken, amount, expiresAt
-        (,,,,,, ILimitOrderManager.TimeInForce tif,,,,) = limitOrderManager.orderData(orderId);
-        assertEq(uint8(tif), uint8(ILimitOrderManager.TimeInForce.ALO));
-    }
-
-    /// @notice Test createOrder with IOC time in force
-    function test_createOrder_withIOC_tif() public {
-        ILimitOrderManager.CreateOrderParams memory params = _createDefaultOrderParams();
-        params.tif = ILimitOrderManager.TimeInForce.IOC;
-
-        vm.prank(user1);
-        uint256 orderId = limitOrderManager.createOrder(params);
-
-        // Verify TIF is stored correctly
-        // OrderData: user, triggerPrice, hyperCoreSpotPairId, aToken, limitPrice, isBuy, tif, reduceOnly, underlyingToken, amount, expiresAt
-        (,,,,,, ILimitOrderManager.TimeInForce tif,,,,) = limitOrderManager.orderData(orderId);
-        assertEq(uint8(tif), uint8(ILimitOrderManager.TimeInForce.IOC));
-    }
-
     /// @notice Test reportFill with partial fill (not fully filled)
     function test_reportFill_partialFill() public {
         uint256 orderId = _createOrder(user1);
@@ -1231,6 +1325,8 @@ contract LimitOrderManagerTest is Test {
     }
 
     /// @notice Test reportFill that completes the order (full fill)
+    /// @dev When placedBaseAmount is 0 (not set via placeOrderOnHyperCore), order stays PARTIALLY_FILLED
+    ///      This test verifies the fill is recorded correctly
     function test_reportFill_fullFill() public {
         uint256 orderId = _createOrder(user1);
 
@@ -1238,13 +1334,17 @@ contract LimitOrderManagerTest is Test {
         vm.prank(keeper);
         limitOrderManager.setOrderStatus(orderId, ILimitOrderManager.OrderStatus.ON_HYPERCORE);
 
-        // Report fill - since placedBaseAmount is 0, any fill marks as FILLED
+        // Report fill - since placedBaseAmount is 0, order goes to PARTIALLY_FILLED
+        // (can't determine if fully filled without knowing placedBaseAmount)
         vm.prank(keeper);
         limitOrderManager.reportFill(orderId, 100e18, 100e6);
 
-        // Verify status changed to FILLED (filledBaseAmount >= placedBaseAmount)
-        (ILimitOrderManager.OrderStatus status,,,,,,,) = limitOrderManager.orderStates(orderId);
-        assertEq(uint8(status), uint8(ILimitOrderManager.OrderStatus.FILLED));
+        // Verify fill amounts are recorded
+        (ILimitOrderManager.OrderStatus status,,,,, uint256 filledBaseAmount, uint256 filledQuoteAmount,) = limitOrderManager.orderStates(orderId);
+        assertEq(filledBaseAmount, 100e18, "Filled base amount should be recorded");
+        assertEq(filledQuoteAmount, 100e6, "Filled quote amount should be recorded");
+        // Status is PARTIALLY_FILLED since placedBaseAmount is 0 (not set via placeOrderOnHyperCore)
+        assertEq(uint8(status), uint8(ILimitOrderManager.OrderStatus.PARTIALLY_FILLED));
     }
 
     /// @notice Test placeOrderOnHyperCore with sell order (isBuy = false)
@@ -1258,7 +1358,7 @@ contract LimitOrderManagerTest is Test {
         uint256 orderId = limitOrderManager.createOrder(params);
 
         // Verify it's a sell order
-        (,,,,, bool isBuy,,,,,) = limitOrderManager.orderData(orderId);
+        (,,,,, bool isBuy,,,) = limitOrderManager.orderData(orderId);
         assertFalse(isBuy, "Should be a sell order");
 
         // Set order to BRIDGING status (simulating the flow)
@@ -1281,16 +1381,16 @@ contract LimitOrderManagerTest is Test {
         uint256 orderId = limitOrderManager.createOrder(params);
 
         // Verify it's a buy order
-        (,,,,, bool isBuy,,,,,) = limitOrderManager.orderData(orderId);
-        assertTrue(isBuy, "Should be a buy order");
+        (,,,,, bool isBuy2,,,) = limitOrderManager.orderData(orderId);
+        assertTrue(isBuy2, "Should be a buy order");
 
         // Set order to BRIDGING status (simulating the flow)
         vm.prank(keeper);
         limitOrderManager.setOrderStatus(orderId, ILimitOrderManager.OrderStatus.BRIDGING);
 
         // Verify status
-        (ILimitOrderManager.OrderStatus status,,,,,,,) = limitOrderManager.orderStates(orderId);
-        assertEq(uint8(status), uint8(ILimitOrderManager.OrderStatus.BRIDGING));
+        (ILimitOrderManager.OrderStatus status2,,,,,,,) = limitOrderManager.orderStates(orderId);
+        assertEq(uint8(status2), uint8(ILimitOrderManager.OrderStatus.BRIDGING));
     }
 
     /// @notice Test settleOrder with buy order (sends base tokens)
@@ -1304,8 +1404,8 @@ contract LimitOrderManagerTest is Test {
         uint256 orderId = limitOrderManager.createOrder(params);
 
         // Verify it's a buy order
-        (,,,,, bool isBuy,,,,,) = limitOrderManager.orderData(orderId);
-        assertTrue(isBuy, "Should be a buy order");
+        (,,,,, bool isBuy3,,,) = limitOrderManager.orderData(orderId);
+        assertTrue(isBuy3, "Should be a buy order");
 
         // Set order to FILLED status (simulating the flow)
         vm.prank(keeper);
@@ -1327,16 +1427,16 @@ contract LimitOrderManagerTest is Test {
         uint256 orderId = limitOrderManager.createOrder(params);
 
         // Verify it's a sell order
-        (,,,,, bool isBuy,,,,,) = limitOrderManager.orderData(orderId);
-        assertFalse(isBuy, "Should be a sell order");
+        (,,,,, bool isBuy4,,,) = limitOrderManager.orderData(orderId);
+        assertFalse(isBuy4, "Should be a sell order");
 
         // Set order to FILLED status (simulating the flow)
         vm.prank(keeper);
         limitOrderManager.setOrderStatus(orderId, ILimitOrderManager.OrderStatus.FILLED);
 
         // Verify status
-        (ILimitOrderManager.OrderStatus status,,,,,,,) = limitOrderManager.orderStates(orderId);
-        assertEq(uint8(status), uint8(ILimitOrderManager.OrderStatus.FILLED));
+        (ILimitOrderManager.OrderStatus status4,,,,,,,) = limitOrderManager.orderStates(orderId);
+        assertEq(uint8(status4), uint8(ILimitOrderManager.OrderStatus.FILLED));
     }
 
     /// @notice Test settleOrder with insufficient HyperCore balance
@@ -1368,52 +1468,6 @@ contract LimitOrderManagerTest is Test {
         // We verify the error selector exists
         bytes4 expectedSelector = ILimitOrderManager.InsufficientWHYPEBalance.selector;
         assertTrue(expectedSelector != bytes4(0), "InsufficientWHYPEBalance error should exist");
-    }
-
-    /// @notice Test placeOrderOnHyperCore with ALO TIF encoding
-    /// @dev This test verifies ALO TIF is stored correctly
-    function test_placeOrderOnHyperCore_withALO() public {
-        // Create order with ALO TIF
-        ILimitOrderManager.CreateOrderParams memory params = _createDefaultOrderParams();
-        params.tif = ILimitOrderManager.TimeInForce.ALO;
-
-        vm.prank(user1);
-        uint256 orderId = limitOrderManager.createOrder(params);
-
-        // Verify TIF is stored correctly
-        (,,,,,, ILimitOrderManager.TimeInForce tif,,,,) = limitOrderManager.orderData(orderId);
-        assertEq(uint8(tif), uint8(ILimitOrderManager.TimeInForce.ALO));
-
-        // Set order to ON_HYPERCORE status (simulating the flow)
-        vm.prank(keeper);
-        limitOrderManager.setOrderStatus(orderId, ILimitOrderManager.OrderStatus.ON_HYPERCORE);
-
-        // Verify status
-        (ILimitOrderManager.OrderStatus status,,,,,,,) = limitOrderManager.orderStates(orderId);
-        assertEq(uint8(status), uint8(ILimitOrderManager.OrderStatus.ON_HYPERCORE));
-    }
-
-    /// @notice Test placeOrderOnHyperCore with IOC TIF encoding
-    /// @dev This test verifies IOC TIF is stored correctly
-    function test_placeOrderOnHyperCore_withIOC() public {
-        // Create order with IOC TIF
-        ILimitOrderManager.CreateOrderParams memory params = _createDefaultOrderParams();
-        params.tif = ILimitOrderManager.TimeInForce.IOC;
-
-        vm.prank(user1);
-        uint256 orderId = limitOrderManager.createOrder(params);
-
-        // Verify TIF is stored correctly
-        (,,,,,, ILimitOrderManager.TimeInForce tif,,,,) = limitOrderManager.orderData(orderId);
-        assertEq(uint8(tif), uint8(ILimitOrderManager.TimeInForce.IOC));
-
-        // Set order to ON_HYPERCORE status (simulating the flow)
-        vm.prank(keeper);
-        limitOrderManager.setOrderStatus(orderId, ILimitOrderManager.OrderStatus.ON_HYPERCORE);
-
-        // Verify status
-        (ILimitOrderManager.OrderStatus status,,,,,,,) = limitOrderManager.orderStates(orderId);
-        assertEq(uint8(status), uint8(ILimitOrderManager.OrderStatus.ON_HYPERCORE));
     }
 
     /// @notice Test pause functionality
@@ -1481,6 +1535,115 @@ contract LimitOrderManagerTest is Test {
         vm.prank(keeper);
         vm.expectRevert("Pausable: paused");
         limitOrderManager.placeOrderOnHyperCore(orderId, 12345);
+    }
+
+    // ============================================
+    // RECOVERY FUNCTION TESTS
+    // ============================================
+
+    /// @notice Test recoverERC20 successfully recovers tokens
+    function test_recoverERC20_success() public {
+        // Send some tokens to the contract accidentally
+        uint256 amount = 100e18;
+        underlying.mint(address(limitOrderManager), amount);
+
+        address recipient = makeAddr("recipient");
+        uint256 recipientBalanceBefore = underlying.balanceOf(recipient);
+
+        // Owner recovers the tokens
+        limitOrderManager.recoverERC20(address(underlying), recipient, amount);
+
+        // Verify tokens were transferred
+        assertEq(underlying.balanceOf(recipient), recipientBalanceBefore + amount);
+        assertEq(underlying.balanceOf(address(limitOrderManager)), 0);
+    }
+
+    /// @notice Test recoverERC20 reverts when called by non-owner
+    function test_recoverERC20_revert_notOwner() public {
+        uint256 amount = 100e18;
+        underlying.mint(address(limitOrderManager), amount);
+
+        vm.prank(user1);
+        vm.expectRevert(ILimitOrderManager.NotOwner.selector);
+        limitOrderManager.recoverERC20(address(underlying), user1, amount);
+    }
+
+    /// @notice Test recoverERC20 reverts when recipient is zero address
+    function test_recoverERC20_revert_zeroAddress() public {
+        uint256 amount = 100e18;
+        underlying.mint(address(limitOrderManager), amount);
+
+        vm.expectRevert(ILimitOrderManager.ZeroAddress.selector);
+        limitOrderManager.recoverERC20(address(underlying), address(0), amount);
+    }
+
+    /// @notice Test recoverNativeHYPE successfully recovers native HYPE
+    function test_recoverNativeHYPE_success() public {
+        // Send some native HYPE to the contract
+        uint256 amount = 1 ether;
+        vm.deal(address(limitOrderManager), amount);
+
+        address payable recipient = payable(makeAddr("recipient"));
+        uint256 recipientBalanceBefore = recipient.balance;
+
+        // Owner recovers the native HYPE
+        limitOrderManager.recoverNativeHYPE(recipient, amount);
+
+        // Verify HYPE was transferred
+        assertEq(recipient.balance, recipientBalanceBefore + amount);
+        assertEq(address(limitOrderManager).balance, 0);
+    }
+
+    /// @notice Test recoverNativeHYPE reverts when called by non-owner
+    function test_recoverNativeHYPE_revert_notOwner() public {
+        uint256 amount = 1 ether;
+        vm.deal(address(limitOrderManager), amount);
+
+        vm.prank(user1);
+        vm.expectRevert(ILimitOrderManager.NotOwner.selector);
+        limitOrderManager.recoverNativeHYPE(payable(user1), amount);
+    }
+
+    /// @notice Test recoverNativeHYPE reverts when recipient is zero address
+    function test_recoverNativeHYPE_revert_zeroAddress() public {
+        uint256 amount = 1 ether;
+        vm.deal(address(limitOrderManager), amount);
+
+        vm.expectRevert(ILimitOrderManager.ZeroAddress.selector);
+        limitOrderManager.recoverNativeHYPE(payable(address(0)), amount);
+    }
+
+    /// @notice Test recoverFundsFromHyperCore reverts when called by non-owner
+    function test_recoverFundsFromHyperCore_revert_notOwner() public {
+        vm.prank(user1);
+        vm.expectRevert(ILimitOrderManager.NotOwner.selector);
+        limitOrderManager.recoverFundsFromHyperCore(HYPE_TOKEN_INDEX, user1, 100e8);
+    }
+
+    /// @notice Test recoverFundsFromHyperCore reverts when destination is zero address
+    function test_recoverFundsFromHyperCore_revert_zeroAddress() public {
+        vm.expectRevert(ILimitOrderManager.ZeroAddress.selector);
+        limitOrderManager.recoverFundsFromHyperCore(HYPE_TOKEN_INDEX, address(0), 100e8);
+    }
+
+    /// @notice Test recoverFundsFromHyperCore reverts when balance is insufficient
+    /// @dev This test mocks the precompile to return zero balance
+    function test_recoverFundsFromHyperCore_revert_insufficientBalance() public {
+        // Mock the spot balance precompile to return 0 balance
+        address SPOT_BALANCE_PRECOMPILE = 0x0000000000000000000000000000000000000801;
+
+        // Create mock response for spotBalance - returns SpotBalance struct with 0 total
+        // SpotBalance has 3 fields: total, hold, entryNtl
+        bytes memory mockResponse = abi.encode(uint64(0), uint64(0), uint64(0));
+        // The precompile uses raw abi.encode(user, token) without function selector
+        vm.mockCall(
+            SPOT_BALANCE_PRECOMPILE,
+            abi.encode(address(limitOrderManager), HYPE_TOKEN_INDEX),
+            mockResponse
+        );
+
+        vm.expectRevert(ILimitOrderManager.InsufficientHyperCoreBalance.selector);
+        limitOrderManager.recoverFundsFromHyperCore(HYPE_TOKEN_INDEX, user1, 100e8);
     }
 
 }
